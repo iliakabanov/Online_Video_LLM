@@ -1,0 +1,20 @@
+# data and training outputs are rebuilt / downloaded by scripts, never committed
+/data/
+/outputs/
+/checkpoints/
+*.pkl
+*.mp4
+*.zip
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

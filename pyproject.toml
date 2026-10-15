@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "online-vllm"
+version = "0.1.0"
+description = "Online (streaming) video LLMs: proactive-QA datasets, training and evaluation"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "fsspec",
+    "aiohttp",          # fsspec https backend: reading single members of the remote CLEVRER zips
+    "imageio-ffmpeg",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+train = ["torch", "transformers", "accelerate"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["online_vllm*", "dataset_builders*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
