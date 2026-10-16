@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = ["torch", "transformers", "accelerate"]
+train = ["torch>=2.5", "transformers>=5.3,<5.4", "peft>=0.18,<0.19", "accelerate", "torchvision"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]
