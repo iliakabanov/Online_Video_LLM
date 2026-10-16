@@ -10,11 +10,12 @@
 | разметка кадров | готово | `data/labels.py` |
 | сборка последовательности, датасет, батч | готово | `data/inputs.py`, `data/dataset.py` |
 | режим модели `decisions`: состояния на всех позициях решений за один проход | готово | `models/model.py` |
-| focal loss, цикл обучения, `scripts/train.py` | готово | `train/loss.py`, `train/loop.py` |
+| извлечение признаков, обучение головы на них, онлайн-оценка с τ | готово | `train/features.py`, `train/head.py` |
+| focal loss, сквозной цикл через базу (`scripts/train.py`) | готово | `train/loss.py`, `train/loop.py` |
 | языковая потеря на ответе (`loss.lm_weight > 0`) | **нет** | |
 | инференс с порогом τ | **нет** | `runtime/controller.py` |
 
-Сейчас обучается только `StateHead` поверх замороженной базы (`configs/model/qwen_3b_head.yaml`, без LoRA). Разделы, описывающие ещё не сделанное, помечены отдельно.
+Сейчас обучается только `StateHead` поверх замороженной базы (`configs/model/qwen_3b_head.yaml`, без LoRA). Основной путь — через сохранённые признаки (раздел «Признаки»). Сквозной цикл `scripts/train.py` прогоняет 3B на каждом шаге, поэтому пригодится для LoRA. Разделы, описывающие ещё не сделанное, помечены отдельно.
 
 ## Данные
 
@@ -77,9 +78,40 @@ Options: <вариант>, <вариант>, …<|vision_start|>
 
 На реальных данных (252×168, k = 1, w = 10) последовательность занимает 1,4–2,4 тысячи токенов.
 
+## Признаки
+
+База заморожена, поэтому её скрытые состояния на позициях решений от эпохи к эпохе не меняются. `scripts/extract_features.py` один раз прогоняет базу по каждому вопросу и сохраняет признаки. `scripts/train_head.py` затем учит голову только на них: 3B в этом цикле не загружается, эпоха идёт минуты.
+
+- **Признаки берутся по всему видео,** а не до `speak`: вопрос и все целые пары кадров (для CLEVRER 64 пары, ~3500 токенов). Признак на паре p после такого прохода совпадает с тем, что модель видит онлайн после пары p (`tests/test_features.py`). Поэтому:
+  - разметку (`labels.speak_delay`), веса классов, γ и всё в `optim` можно менять без повторного извлечения;
+  - признаки после пары `speak` дают онлайн-оценку с порогом τ.
+- **Повторное извлечение нужно** при смене `video.*` (кадры) или модели: признаки сохраняют эти настройки в `meta.json`, и обучение головы сверяет их с конфигом.
+- **Хранение:** float16, строка 2048 чисел (4 КБ) на пару. Около 17 ГБ для `train_group1` (66 284 × 64 пары) и 9 ГБ для `val_group1`.
+- **Прерывание не страшно:** повторный запуск той же команды продолжит с последнего сохранённого вопроса (файл `done`).
+
+Формат каталога признаков:
+```
+meta.json      модель и её ревизия, frame_stride, frame_size, temporal_patch, hidden_size, число вопросов и пар
+index.jsonl    по строке на вопрос: запись, смещение и число пар
+features.npy   float16 [все пары, hidden]
+done           сколько вопросов уже записано
+```
+
+Онлайн-оценка: для каждого вопроса модель «отвечает» на первой паре, где P(speak) > τ. Исход:
+
+| исход | когда сработало |
+|---|---|
+| `premature` | до того, как ответ виден (пара `silent`) |
+| `early` | ответ виден, но раньше пары `speak` (`prepare`) |
+| `on_target` | на паре `speak` |
+| `late` | позже |
+| `missed` | ни разу за видео |
+
+Плюс медианная задержка в исходных кадрах относительно пары `speak`: отрицательная — раньше, положительная — позже.
+
 ## Шаг обучения
 
-1. Батч последовательностей (паддинг справа) проходит через модель в режиме `decisions` один раз. Логиты состояния берутся на всех позициях, где `state_labels != -100`.
+1. На признаках (`train_head.py`): батч из `batch_size` вопросов — их признаки до пары `speak`, разметка по текущему `speak_delay`. Через базу (`train.py`): батч последовательностей (паддинг справа) один раз проходит через модель в режиме `decisions`, и логиты состояния берутся на всех позициях, где `state_labels != -100`.
 2. Потеря — focal loss, усреднённая по всем позициям решений батча:
    ```
    focal = −α_c · (1 − p_c)^γ · log p_c
@@ -177,28 +209,53 @@ print(builder.processor.tokenizer.decode(x["input_ids"][0, -12:]))
 
 Классы передаются в порядке `head.classes` из `configs/model/qwen_3b_state.yaml`: номер класса в метках — это его индекс в этом списке.
 
-### 5. Обучение
+### 5. Извлечение признаков
 
 ```bash
-python scripts/train.py --model configs/model/qwen_3b_head.yaml --train configs/train/group1.yaml \
-    --output outputs/group1_head --device cuda
+python scripts/extract_features.py --split train --device cuda --limit 20   # пробный прогон: скорость и память
+python scripts/extract_features.py --split train --device cuda
+python scripts/extract_features.py --split eval --device cuda
 ```
+
+Пробный прогон с `--limit N` пишет в соседний каталог `<каталог>_firstN` и полному запуску не мешает. Прогресс-бар показывает вопросы, скорость и оставшееся время, а `saved` — сколько вопросов уже сохранено на диск (раз в 50). После прерывания извлечение продолжит с этого числа.
+
+Это единственный шаг, где нужна 3B. Модель Qwen2.5-VL-3B — это 3,76 млрд параметров (языковая часть 3,09 млрд и визуальный энкодер 0,67 млрд), в bf16 ~7,5 ГБ. На 8 ГБ это не помещается. Windows при этом не падает, а выгружает лишнее в оперативную память («Общая память GPU» в Диспетчере задач), и всё идёт в десятки раз медленнее.
+
+Поэтому в `configs/model/qwen_3b_head.yaml` стоит `quantization: 8bit`: линейные слои языковой части хранятся в int8 (bitsandbytes), визуальный энкодер и эмбеддинги остаются в bf16. Всего ~4,7 ГБ видеопамяти. Признаки получаются от квантованной базы, поэтому голова должна работать на той же базе: квантование записывается в `meta.json` признаков, и `train_head.py` проверяет его совпадение с конфигом модели. Каталог признаков для int8 — `features/group1_s1_252x168_int8/`. Для извлечения в полной точности (GPU от 16 ГБ) уберите `quantization` и смените каталог.
+
+Модель грузится сразу на GPU, без промежуточной копии весов в оперативной памяти. Каждый воркер DataLoader — отдельный процесс (~2 ГБ RAM), по умолчанию он один (`--num-workers 1`).
 
 При первом запуске скачиваются веса Qwen2.5-VL-3B (~7,5 ГБ). Если они уже в кэше, добавьте `--local-files-only`. Корень данных задаётся `--data-root`, по умолчанию `$DATA_ROOT` или `./data`.
 
+### 6. Обучение головы
+
+```bash
+python scripts/train_head.py --output outputs/group1_head --device cuda
+```
+
+Сквозное обучение через базу (для LoRA, нужна `batch_size` 1–2) запускается так:
+```bash
+python scripts/train.py --model configs/model/qwen_3b_head.yaml --train configs/train/group1.yaml \
+    --output outputs/group1_e2e --device cuda
+```
+
 В `--output` появятся:
 - `train.yaml` — конфиг обучения;
-- `metrics.jsonl` — строка на каждое логирование и оценку: `loss`, `lr`, `eval_loss`, `eval_accuracy`, `eval_recall_<класс>`, `eval_confusion[истинный][предсказанный]`;
-- `step_N/` и `final/` — чекпоинты (`model.yaml`, `trainable.pt`, `train.yaml`), загружаются через `load_checkpoint`.
+- `metrics.jsonl` — строка на каждое логирование и оценку: `loss`, `lr`, `eval_loss`, `eval_accuracy`, `eval_recall_<класс>`, `eval_confusion[истинный][предсказанный]`. У `train_head.py` есть ещё `online_<τ>_<исход>` и `online_<τ>_median_delay_frames`. Последняя оценка (`"final": true`) идёт по всему eval, промежуточные — по `eval_samples` вопросам;
+- `step_N/` и `final/` — чекпоинты (`model.yaml`, `trainable.pt`, `train.yaml`), загружаются через `load_checkpoint` как полная модель.
 
-Нужная память GPU: веса 3B в bf16 занимают ~7,5 ГБ, плюс проход без градиента по 1,5–2,5 тысячам токенов.
+**Где брать вектор для головы.** Голова учится на последнем визуальном токене пары. Нынешний `OnlineController` классифицирует по последнему токену шаблона (`assistant`), то есть по другой позиции. При реализации инференса с τ его нужно перевести на позицию решения.
 
 ## Файлы
 
 ```
 configs/train/group1.yaml        данные, кадры, разметка, потеря, оптимизация
 configs/model/qwen_3b_head.yaml  замороженная Qwen2.5-VL-3B + StateHead, без LoRA
-scripts/train.py                 точка запуска
+scripts/extract_features.py      извлечение признаков (один раз, нужна 3B)
+scripts/train_head.py            обучение головы на признаках
+scripts/train.py                 сквозное обучение через базу
+src/online_vllm/train/features.py  извлечение и чтение признаков
+src/online_vllm/train/head.py    обучение головы на признаках, онлайн-оценка с τ
 src/online_vllm/train/config.py  TrainConfig: загрузка и проверка конфига
 src/online_vllm/train/loss.py    focal loss, веса классов
 src/online_vllm/train/loop.py    цикл обучения, оценка, чекпоинты
@@ -207,5 +264,5 @@ src/online_vllm/data/labels.py   plan(): метки пар silent / prepare / sp
 src/online_vllm/data/video.py    read_every(): каждый k-й кадр с уменьшением
 src/online_vllm/data/inputs.py   InputBuilder.build_sequence(): последовательность и разметка по позициям
 src/online_vllm/data/dataset.py  ProactiveDataset, collate
-tests/test_labels.py, tests/test_sequence.py, tests/test_train.py
+tests/test_labels.py, tests/test_sequence.py, tests/test_train.py, tests/test_features.py
 ```

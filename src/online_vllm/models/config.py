@@ -10,6 +10,7 @@ class BackboneConfig:
     model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct"
     revision: str | None = None
     dtype: str = "bfloat16"
+    quantization: str | None = None  # "8bit": the language model's linear layers in int8 (CUDA only)
 
 
 @dataclass
@@ -40,6 +41,8 @@ class ModelConfig:
     def validate(self):
         if self.backbone.dtype not in {"float32", "float16", "bfloat16"}:
             raise ValueError("Unsupported backbone dtype")
+        if self.backbone.quantization not in {None, "8bit"}:
+            raise ValueError("quantization must be null or 8bit")
         if not self.head.classes or len(set(self.head.classes)) != len(self.head.classes):
             raise ValueError("classes must be nonempty and unique")
         if any(not isinstance(c, str) or not c for c in self.head.classes):

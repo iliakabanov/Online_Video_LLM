@@ -18,9 +18,19 @@ def save_checkpoint(model, path: str | Path):
     torch.save(weights, path / "trainable.pt")
 
 
-def load_checkpoint(path: str | Path, *, local_files_only: bool = False):
+def save_head_checkpoint(config: ModelConfig, head, path: str | Path):
+    """A head trained apart from the backbone (on cached features), in the same format as save_checkpoint."""
+    if config.lora.enabled:
+        raise ValueError("A head-only checkpoint must have lora.enabled: false")
     path = Path(path)
-    model = build_model(ModelConfig.load(path / "model.yaml"), local_files_only=local_files_only)
+    path.mkdir(parents=True, exist_ok=True)
+    config.save(path / "model.yaml")
+    torch.save({"head": head.state_dict()}, path / "trainable.pt")
+
+
+def load_checkpoint(path: str | Path, *, local_files_only: bool = False, device: str | None = None):
+    path = Path(path)
+    model = build_model(ModelConfig.load(path / "model.yaml"), local_files_only=local_files_only, device=device)
     weights = torch.load(path / "trainable.pt", map_location="cpu", weights_only=True)
     model.state_head.load_state_dict(weights["head"], strict=True)
     if model.config.lora.enabled:

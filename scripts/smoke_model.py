@@ -23,7 +23,7 @@ def main():
     config = ModelConfig.load(args.config)
     if args.device == "cpu":
         config.backbone.dtype = "float32"
-    model = build_model(config, local_files_only=args.local_files_only).to(args.device).eval()
+    model = build_model(config, local_files_only=args.local_files_only, device=args.device).eval()
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     frames = np.zeros((2, 56, 56, 3), dtype=np.uint8)
     inputs = builder.build_observation("What is visible?", VideoPrefix(frames, fps=2), t=0.5)

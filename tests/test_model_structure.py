@@ -69,6 +69,34 @@ def test_last_non_padding_and_class_count(tiny_base, padding):
         model(dict(input_ids=torch.tensor([[0]]), attention_mask=torch.tensor([[0]])))
 
 
+def test_8bit_needs_cuda(tiny_base):
+    config = settings(tiny_base)
+    config.backbone.quantization = "8bit"
+    with pytest.raises(ValueError, match="CUDA"):
+        build_model(config, local_files_only=True, device="cpu")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bitsandbytes int8 needs CUDA")
+def test_8bit_language_model_only(tiny_base):
+    import bitsandbytes as bnb
+
+    config = settings(tiny_base)
+    config.lora.enabled = False
+    exact = build_model(config, local_files_only=True, device="cuda").eval()
+    config.backbone.quantization = "8bit"
+    model = build_model(config, local_files_only=True, device="cuda").eval()
+    int8 = [n for n, m in model.qwen.named_modules() if isinstance(m, bnb.nn.Linear8bitLt)]
+    assert int8 and all(n.startswith("model.language_model.") for n in int8)
+    assert not any(isinstance(m, bnb.nn.Linear8bitLt) for m in model.qwen.model.visual.modules())
+    assert next(model.state_head.parameters()).dtype == torch.float32
+    inputs = {k: v.cuda() if torch.is_tensor(v) else v for k, v in video_inputs().items()}
+    mask = torch.zeros_like(inputs["input_ids"], dtype=torch.bool)
+    mask[0, 3] = True
+    with torch.no_grad():
+        a, b = model.decision_features(inputs, mask).float(), exact.decision_features(inputs, mask).float()
+    assert torch.isfinite(a).all() and torch.nn.functional.cosine_similarity(a, b).item() > 0.9
+
+
 def test_bad_lora_target_fails(tiny_base):
     config = settings(tiny_base)
     config.lora.modules = ["missing_projection"]

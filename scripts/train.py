@@ -32,7 +32,7 @@ def main():
     model_config = ModelConfig.load(args.model)
     if args.device == "cpu":
         model_config.backbone.dtype = "float32"
-    model = build_model(model_config, local_files_only=args.local_files_only).to(args.device)
+    model = build_model(model_config, local_files_only=args.local_files_only, device=args.device)
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     final = train(model, builder, TrainConfig.load(args.train), Path(args.data_root), Path(args.output), args.device)
     print("Final checkpoint:", final)

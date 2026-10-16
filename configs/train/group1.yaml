@@ -1,13 +1,18 @@
-# Training on CLEVRER-Proactive group 1 (one answer that appears once and does not change).
-# Pair with configs/model/qwen_3b_head.yaml to train the state head alone on a frozen backbone.
+# Training the state head on CLEVRER-Proactive group 1 (one answer that appears once and does not change).
+# Pair with configs/model/qwen_3b_head.yaml (frozen backbone, no LoRA):
+#   scripts/extract_features.py --split train|eval   once: backbone features of every patch of every video
+#   scripts/train_head.py                            the head on those features, any number of times
 data:
   train: processed/clevrer_proactive/train_group1.jsonl   # relative to DATA_ROOT
   eval: processed/clevrer_proactive/val_group1.jsonl
-  eval_samples: 500        # fixed random subset of eval used during training; null: all of it
-video:
+  eval_samples: 2000       # fixed random subset of eval for the evaluations during training; the final one uses all
+features:                  # where extract_features.py writes and train_head.py reads, relative to DATA_ROOT
+  train: features/group1_s1_252x168_int8/train
+  eval: features/group1_s1_252x168_int8/val
+video:                     # baked into the features: changing these needs a new extraction
   frame_stride: 1          # the model sees every k-th source frame
   frame_size: [252, 168]   # [width, height] the frames are resized to; multiples of 28 (Qwen patch 14 x merge 2)
-labels:
+labels:                    # applied when training the head: can change without a new extraction
   speak_delay: 10          # w, in model frames: silent before S, prepare on [S, S + w), speak on the first patch end >= S + w
 loss:
   focal_gamma: 2.0
@@ -16,14 +21,16 @@ loss:
 optim:
   lr: 1.0e-3
   weight_decay: 0.01
-  warmup_steps: 50         # optimizer steps of linear warmup, then cosine decay to 0
-  epochs: 1
+  warmup_steps: 100        # optimizer steps of linear warmup, then cosine decay to 0
+  epochs: 5
   max_steps: null          # optimizer steps; null: run all epochs
-  batch_size: 1            # sequences per forward pass
-  grad_accum: 16           # forward passes per optimizer step
+  batch_size: 64           # sequences (questions) per step; scripts/train.py through the backbone needs 1-2
+  grad_accum: 1
   grad_clip: 1.0
-  num_workers: 2           # DataLoader workers decoding videos
-  log_every: 10
-  eval_every: 200
-  save_every: 200
+  num_workers: 2           # scripts/train.py only: DataLoader workers decoding videos
+  log_every: 50
+  eval_every: 500
+  save_every: 1000
+eval:
+  taus: [0.3, 0.5, 0.7, 0.9]   # online simulation: answer at the first patch with P(speak) > tau
 seed: 0

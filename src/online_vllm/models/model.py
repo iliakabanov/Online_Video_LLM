@@ -49,6 +49,13 @@ class VideoStateModel(nn.Module):
         with torch.set_grad_enabled(trainable):
             return self.qwen.model(**kwargs).last_hidden_state
 
+    def decision_features(self, inputs: dict, decision_mask: torch.Tensor) -> torch.Tensor:
+        """Backbone hidden states at every True position of decision_mask [B, S], flattened in batch then position
+        order [N, hidden]: exactly what the state head sees."""
+        if decision_mask is None or decision_mask.shape != inputs["input_ids"].shape:
+            raise ValueError("decision_mask must match input_ids")
+        return self._hidden(self._fresh_inputs(inputs))[decision_mask]
+
     def _classify(self, features):
         return self.state_head(features.to(next(self.state_head.parameters()).dtype))
 
@@ -64,9 +71,7 @@ class VideoStateModel(nn.Module):
         if "labels" in inputs:
             raise ValueError("Classification targets belong in the external loss, not model inputs")
         if mode == "decisions":
-            if decision_mask is None or decision_mask.shape != inputs["input_ids"].shape:
-                raise ValueError("decisions mode needs a decision_mask matching input_ids")
-            return StateOutput(self._classify(self._hidden(kwargs)[decision_mask]))
+            return StateOutput(self._classify(self.decision_features(inputs, decision_mask)))
         ids = inputs["input_ids"]
         mask = inputs.get("attention_mask", torch.ones_like(ids))
         if mask.shape != ids.shape or mask.ndim != 2 or not torch.all((mask == 0) | (mask == 1)):

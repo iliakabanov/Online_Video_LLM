@@ -3,6 +3,7 @@ backbone:
   model_id: Qwen/Qwen2.5-VL-3B-Instruct
   revision: null  # Resolved Hub commit is recorded on loading; pin it for experiment runs.
   dtype: bfloat16
+  quantization: 8bit  # language model in int8 (~4.7 GB of GPU memory instead of 7.5); vision encoder stays bfloat16
 lora:
   enabled: false
 head:

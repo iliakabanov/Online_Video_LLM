@@ -13,6 +13,18 @@ class DataConfig:
 
 
 @dataclass
+class FeaturesConfig:
+    """Cached backbone features of data.train / data.eval (train/features.py), relative to DATA_ROOT."""
+    train: str = "features/group1_s1_252x168_int8/train"
+    eval: str = "features/group1_s1_252x168_int8/val"
+
+
+@dataclass
+class EvalConfig:
+    taus: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7, 0.9])  # thresholds on P(speak) online
+
+
+@dataclass
 class VideoConfig:
     frame_stride: int = 1
     frame_size: list[int] = field(default_factory=lambda: [252, 168])  # [width, height]
@@ -49,10 +61,12 @@ class OptimConfig:
 @dataclass
 class TrainConfig:
     data: DataConfig = field(default_factory=DataConfig)
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     labels: LabelConfig = field(default_factory=LabelConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     seed: int = 0
 
     def validate(self):
@@ -75,16 +89,20 @@ class TrainConfig:
             raise ValueError("log_every, eval_every, save_every must be positive")
         if self.data.eval_samples is not None and self.data.eval_samples < 1:
             raise ValueError("eval_samples must be null or positive")
+        if any(not 0 < t < 1 for t in self.eval.taus):
+            raise ValueError("eval taus must be in (0, 1)")
 
     @classmethod
     def from_dict(cls, values):
         values = dict(values)
         result = cls(
             data=DataConfig(**values.pop("data", {})),
+            features=FeaturesConfig(**values.pop("features", {})),
             video=VideoConfig(**values.pop("video", {})),
             labels=LabelConfig(**values.pop("labels", {})),
             loss=LossConfig(**values.pop("loss", {})),
             optim=OptimConfig(**values.pop("optim", {})),
+            eval=EvalConfig(**values.pop("eval", {})),
             seed=values.pop("seed", 0),
         )
         if values:

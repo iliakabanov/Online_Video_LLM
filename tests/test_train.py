@@ -62,7 +62,8 @@ def test_decisions_match_online_prefixes(builder, tiny_base):
             "pixel_values_videos": x["pixel_values_videos"][:(p + 1) * h * w],
             "video_grid_thw": torch.tensor([[p + 1, h, w]]), "second_per_grid_ts": x["second_per_grid_ts"],
         }
-        torch.testing.assert_close(model.predict_state(prefix).state_logits[0], decisions[p])
+        # Sequences of different length take different attention kernels: float32 noise only.
+        torch.testing.assert_close(model.predict_state(prefix).state_logits[0], decisions[p], rtol=1e-4, atol=1e-4)
     with pytest.raises(ValueError, match="mm_token_type_ids"):
         model.predict_state({k: v for k, v in inputs.items() if k != "mm_token_type_ids"})
 

@@ -5,7 +5,7 @@ import re
 
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import Qwen2_5_VLForConditionalGeneration
+from transformers import BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
 
 from .config import ModelConfig
 from .model import VideoStateModel
@@ -41,15 +41,27 @@ def resolve_targets(base, config):
     return targets
 
 
-def build_model(config: ModelConfig, *, local_files_only: bool = False) -> VideoStateModel:
+def build_model(config: ModelConfig, *, local_files_only: bool = False, device: str | None = None) -> VideoStateModel:
+    """Load the backbone straight onto `device` (default: CPU), without a full copy of the weights in RAM first."""
     config = deepcopy(config)
     config.validate()
+    quantization = None
+    if config.backbone.quantization == "8bit":
+        if device is None or torch.device(device).type != "cuda":
+            raise ValueError("8-bit quantization needs a CUDA device")
+        # The vision encoder stays in dtype: it is small, and its output is what the language model attends to.
+        # Skip patterns match from the start of the full module name.
+        quantization = BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=["model.visual", "lm_head"])
+        # Every int8 layer warns on every call that its bfloat16 inputs are cast to float16 (the kernel's type).
+        logging.getLogger("bitsandbytes.autograd._functions").setLevel(logging.ERROR)
     base = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         config.backbone.model_id,
         revision=config.backbone.revision,
         dtype=getattr(torch, config.backbone.dtype),
         local_files_only=local_files_only,
         attn_implementation="sdpa",
+        device_map=device,
+        quantization_config=quantization,
     )
     # Preserve the resolved Hub commit in checkpoints even if the caller used a branch name.
     revision = getattr(base.config, "_commit_hash", None)
