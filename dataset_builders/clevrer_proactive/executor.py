@@ -47,23 +47,35 @@ def build_cache(split):
         return pickle.loads(path.read_bytes())
     cache = {}
     for p in sorted(glob.glob(str(RAW / "annotations" / split / "*" / "annotation_*.json"))):
-        a = json.loads(Path(p).read_text())
-        n = len(a["object_property"])
-        vis = np.zeros((n, N_FRAMES), bool)
-        vel = np.zeros((n, N_FRAMES, 2), np.float32)
-        loc = np.zeros((n, N_FRAMES, 2), np.float32)
-        for f in a["motion_trajectory"]:
-            for o in f["objects"]:
-                i, t = o["object_id"], f["frame_id"]
-                vis[i, t] = o["inside_camera_view"]
-                vel[i, t] = o["velocity"][:2]
-                loc[i, t] = o["location"][:2]
-        cache[a["scene_index"]] = {"objs": [{k: o[k] for k in ("color", "material", "shape")} for o in a["object_property"]],
-                                   "vis": vis, "vel": vel, "loc": loc,
-                                   "cols": [(c["object_ids"][0], c["object_ids"][1], c["frame_id"]) for c in a["collision"]]}
+        sid, s = load_annotation(p)
+        cache[sid] = s
     CACHE.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps(cache, protocol=pickle.HIGHEST_PROTOCOL))
     return cache
+
+
+def annotation_path(split, sid):
+    """<RAW>/annotations/<split>/annotation_10000-11000/annotation_10001.json"""
+    lo = sid // 1000 * 1000
+    return RAW / "annotations" / split / f"annotation_{lo:05d}-{lo + 1000:05d}" / f"annotation_{sid:05d}.json"
+
+
+def load_annotation(p):
+    """One annotation file -> (scene_index, cache entry as in build_cache)."""
+    a = json.loads(Path(p).read_text())
+    n = len(a["object_property"])
+    vis = np.zeros((n, N_FRAMES), bool)
+    vel = np.zeros((n, N_FRAMES, 2), np.float32)
+    loc = np.zeros((n, N_FRAMES, 2), np.float32)
+    for f in a["motion_trajectory"]:
+        for o in f["objects"]:
+            i, t = o["object_id"], f["frame_id"]
+            vis[i, t] = o["inside_camera_view"]
+            vel[i, t] = o["velocity"][:2]
+            loc[i, t] = o["location"][:2]
+    return a["scene_index"], {"objs": [{k: o[k] for k in ("color", "material", "shape")} for o in a["object_property"]],
+                              "vis": vis, "vel": vel, "loc": loc,
+                              "cols": [(c["object_ids"][0], c["object_ids"][1], c["frame_id"]) for c in a["collision"]]}
 
 
 class Scene:

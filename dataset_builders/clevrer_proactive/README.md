@@ -313,7 +313,7 @@ cube enters?» известен в момент, когда въехал куб.
   last_enter) с исходным рядом: **0 расхождений**.
 - **Сверка причин с CLEVRER:** все варианты cause_*, которые совпадают по тексту с вариантами
   официальных explanatory-вопросов, оценены так же, как у авторов (28 из 28 на 500 сценах).
-- **Ручная проверка** на странице, которую собирает `viewer.py`. По её итогам исправлены
+- **Ручная проверка** на странице проверки (`viewer.py`). По её итогам исправлены
   формулировка first_start, смешанные виды вариантов, слияние коротких интервалов, ответ «none» и
   окончательность ответов exist.
 
@@ -336,9 +336,17 @@ python -m $M.generate --split train                   # -> data/processed/clevre
 python -m $M.balance train.json                       # -> train_balanced.json
 python -m $M.export --split train                     # -> train.jsonl (общий формат)
 #   то же для --split validation / validation.json
-python -m $M.viewer --file validation_balanced.json --scenes 20
-python -m http.server 8000 -d data                    # http://localhost:8000/clevrer_proactive_viewer.html
+python -m $M.subset                                   # -> train_group1.{json,jsonl}, val_group1.{json,jsonl}
+#   только группа 1, без cause_*, без will_* и без clevrer_exist с «no» в конце видео
+python -m $M.viewer [--port 8000]                     # http://localhost:8000/clevrer_proactive_viewer.html (или просто /)
 ```
+
+Страница проверки (`viewer.py`) — небольшой сервер. В нём можно открыть любое видео train и validation:
+переключить сплит, ввести номер видео в сплите (от 0), листать (◀ ▶, `[` `]`) или взять случайное (`R`).
+Листание учитывает фильтры по группе и семейству. Видео записывается в адрес (`#validation/17`). Данные сцены считаются по
+кэшу аннотаций в момент открытия. Видео берётся из распакованных zip CLEVRER
+(`data/raw/clevrer/video_{train,validation}/video_XXXXX-YYYYY/`), затем из `data/raw/clevrer/videos/`, а если
+его нет и там, один раз скачивается из zip CLEVRER и сохраняется в `videos/`.
 
 Пути задаются в `paths.py`: `DATA_ROOT` переносит всё (по умолчанию `<repo>/data`), `CLEVRER_RAW` указывает на
 уже скачанную копию сырых файлов CLEVRER.

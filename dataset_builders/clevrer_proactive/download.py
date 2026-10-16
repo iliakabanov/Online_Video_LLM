@@ -4,7 +4,7 @@
     <RAW>/annotations/{train,validation}/annotation_*/...     scene annotations (224 MB zipped, 1.9 GB extracted)
     <RAW>/videos/video_*.mp4                                 only with --videos all (train 12.4 GB + validation 6.2 GB)
 
-Without --videos the review page (viewer.py) fetches the few videos it shows one by one from the remote zips.
+Without --videos the review page (viewer.py) fetches the videos it shows one by one from the remote zips.
 
     python -m dataset_builders.clevrer_proactive.download [--videos all] [--keep-zips]
 """
