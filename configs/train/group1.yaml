@@ -1,4 +1,9 @@
 # Training on CLEVRER-Proactive group 1 (one answer that appears once and does not change).
+# Pair with configs/model/qwen_3b_head.yaml to train the state head alone on a frozen backbone.
+data:
+  train: processed/clevrer_proactive/train_group1.jsonl   # relative to DATA_ROOT
+  eval: processed/clevrer_proactive/val_group1.jsonl
+  eval_samples: 500        # fixed random subset of eval used during training; null: all of it
 video:
   frame_stride: 1          # the model sees every k-th source frame
   frame_size: [252, 168]   # [width, height] the frames are resized to; multiples of 28 (Qwen patch 14 x merge 2)
@@ -7,4 +12,18 @@ labels:
 loss:
   focal_gamma: 2.0
   class_alpha: {silent: 0.25, prepare: 1.0, speak: 1.0}
-  lm_weight: 1.0           # 0: no answer tokens in the sequence, state loss only
+  lm_weight: 0.0           # language loss on the answer; not implemented yet, must stay 0
+optim:
+  lr: 1.0e-3
+  weight_decay: 0.01
+  warmup_steps: 50         # optimizer steps of linear warmup, then cosine decay to 0
+  epochs: 1
+  max_steps: null          # optimizer steps; null: run all epochs
+  batch_size: 1            # sequences per forward pass
+  grad_accum: 16           # forward passes per optimizer step
+  grad_clip: 1.0
+  num_workers: 2           # DataLoader workers decoding videos
+  log_every: 10
+  eval_every: 200
+  save_every: 200
+seed: 0

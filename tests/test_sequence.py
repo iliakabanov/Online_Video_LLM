@@ -26,6 +26,7 @@ def test_layout_with_answer(builder):
     assert state == [IGNORE, IGNORE, IGNORE, 0, IGNORE, 1, IGNORE, 2, IGNORE, IGNORE, IGNORE, IGNORE]
     assert x["lm_labels"][0].tolist() == [IGNORE] * 10 + [tok("green"), tok("<|im_end|>")]
     assert x["attention_mask"].tolist() == [[1] * 12]
+    assert x["mm_token_type_ids"].tolist() == [[0, 0, *[2] * 6, 0, 0, 0, 0]]
 
 
 def test_layout_without_answer(builder):
@@ -48,6 +49,7 @@ def test_collate_pads_right(builder):
     batch = collate([a, b], pad_id=builder.processor.tokenizer.pad_token_id)
     assert batch["input_ids"].shape == (2, 12)
     assert batch["attention_mask"][1].tolist() == [1] * 8 + [0] * 4
+    assert batch["mm_token_type_ids"].shape == (2, 12)
     assert batch["state_labels"][1, 8:].eq(IGNORE).all() and batch["lm_labels"][1, 8:].eq(IGNORE).all()
     assert batch["video_grid_thw"].tolist() == [[3, 4, 2], [1, 4, 2]]
     assert batch["pixel_values_videos"].shape[0] == len(a["pixel_values_videos"]) + len(b["pixel_values_videos"])

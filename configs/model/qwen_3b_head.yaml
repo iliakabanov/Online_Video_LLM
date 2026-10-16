@@ -1,0 +1,12 @@
+# The state head alone on a frozen Qwen2.5-VL-3B: no LoRA.
+backbone:
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: null  # Resolved Hub commit is recorded on loading; pin it for experiment runs.
+  dtype: bfloat16
+lora:
+  enabled: false
+head:
+  classes: [silent, prepare, speak]
+  hidden_dims: [512]
+  activation: gelu
+  dropout: 0.1

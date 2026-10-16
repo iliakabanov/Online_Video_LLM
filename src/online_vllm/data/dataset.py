@@ -51,6 +51,7 @@ def collate(examples, pad_id: int):
     return {
         "input_ids": pad("input_ids", pad_id),
         "attention_mask": pad("attention_mask", 0),
+        "mm_token_type_ids": pad("mm_token_type_ids", 0),
         "state_labels": pad("state_labels", IGNORE),
         "lm_labels": pad("lm_labels", IGNORE),
         "pixel_values_videos": torch.cat([e["pixel_values_videos"] for e in examples]),

@@ -1,4 +1,8 @@
-"""One shared Qwen; classification and language heads are mutually exclusive paths."""
+"""One shared Qwen; classification and language heads are mutually exclusive paths.
+
+The state head is kept in float32 whatever the backbone dtype: its features are cast up, so small head updates are not
+lost to bfloat16 rounding.
+"""
 from dataclasses import dataclass
 from typing import Literal
 
@@ -21,8 +25,7 @@ class VideoStateModel(nn.Module):
         self.config = config
         base = self.qwen
         self.state_head = StateHead(base.config.text_config.hidden_size, config.head)
-        embedding = base.get_input_embeddings().weight
-        self.state_head.to(device=embedding.device, dtype=embedding.dtype)
+        self.state_head.to(device=base.get_input_embeddings().weight.device)
 
     @property
     def qwen(self):
@@ -32,18 +35,38 @@ class VideoStateModel(nn.Module):
     def _fresh_inputs(self, inputs):
         if inputs.get("past_key_values") is not None:
             raise ValueError("Pass the full current sequence, not a cache from a previous call")
+        if ("pixel_values_videos" in inputs or "pixel_values" in inputs) and inputs.get("mm_token_type_ids") is None:
+            # Without them Qwen silently falls back to 1D positions for the visual tokens.
+            raise ValueError("Visual inputs need the processor's mm_token_type_ids")
         # Qwen stores positional bookkeeping internally. Independent observations must not share it.
         self.qwen.model.rope_deltas = None
         return {**inputs, "use_cache": False, "return_dict": True}
 
-    def forward(self, inputs: dict, *, mode: Literal["state", "language"] = "state"):
-        if mode not in {"state", "language"}:
+    def _hidden(self, kwargs):
+        # Calling Qwen.model avoids the vocabulary projection entirely. A frozen backbone keeps no activations:
+        # the head's backward pass does not need them.
+        trainable = torch.is_grad_enabled() and any(p.requires_grad for p in self.backbone.parameters())
+        with torch.set_grad_enabled(trainable):
+            return self.qwen.model(**kwargs).last_hidden_state
+
+    def _classify(self, features):
+        return self.state_head(features.to(next(self.state_head.parameters()).dtype))
+
+    def forward(self, inputs: dict, *, mode: Literal["state", "decisions", "language"] = "state",
+                decision_mask: torch.Tensor | None = None):
+        """state: logits at the last non-padding position [B, C]. decisions: logits at every True position of
+        decision_mask [B, S] in one pass over the whole sequence, flattened in batch then position order [N, C]."""
+        if mode not in {"state", "decisions", "language"}:
             raise ValueError(f"Unknown mode: {mode}")
         kwargs = self._fresh_inputs(inputs)
         if mode == "language":
             return self.backbone(**kwargs)
         if "labels" in inputs:
             raise ValueError("Classification targets belong in the external loss, not model inputs")
+        if mode == "decisions":
+            if decision_mask is None or decision_mask.shape != inputs["input_ids"].shape:
+                raise ValueError("decisions mode needs a decision_mask matching input_ids")
+            return StateOutput(self._classify(self._hidden(kwargs)[decision_mask]))
         ids = inputs["input_ids"]
         mask = inputs.get("attention_mask", torch.ones_like(ids))
         if mask.shape != ids.shape or mask.ndim != 2 or not torch.all((mask == 0) | (mask == 1)):
@@ -52,10 +75,8 @@ class VideoStateModel(nn.Module):
             raise ValueError("Every input must contain at least one non-padding token")
         positions = torch.arange(ids.shape[1], device=ids.device).expand_as(ids)
         last = positions.masked_fill(~mask.bool(), -1).amax(dim=1)
-        # Calling Qwen.model avoids the vocabulary projection entirely.
-        hidden = self.qwen.model(**kwargs).last_hidden_state
-        features = hidden[torch.arange(ids.shape[0], device=ids.device), last]
-        return StateOutput(self.state_head(features))
+        hidden = self._hidden(kwargs)
+        return StateOutput(self._classify(hidden[torch.arange(ids.shape[0], device=ids.device), last]))
 
     @torch.inference_mode()
     def predict_state(self, inputs: dict) -> StateOutput:

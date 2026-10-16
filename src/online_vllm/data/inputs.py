@@ -90,13 +90,16 @@ class InputBuilder:
         state = torch.full_like(ids, IGNORE)
         state[video[per_patch - 1::per_patch]] = torch.tensor(labels)
         lm = torch.full_like(ids, IGNORE)
+        types = inputs["mm_token_type_ids"][0]  # Qwen builds the 3D video positions from these
         if answer is not None:
             answer_ids = tokenizer(answer + tokenizer.eos_token, add_special_tokens=False,
                                    return_tensors="pt").input_ids[0]
             ids = torch.cat([ids, answer_ids])
             state = torch.cat([state, torch.full_like(answer_ids, IGNORE)])
             lm = torch.cat([lm, answer_ids])
+            types = torch.cat([types, torch.zeros_like(answer_ids, dtype=types.dtype)])
         inputs["input_ids"] = ids[None]
+        inputs["mm_token_type_ids"] = types[None]
         inputs["attention_mask"] = torch.ones_like(ids)[None]
         inputs["state_labels"] = state[None]
         inputs["lm_labels"] = lm[None]

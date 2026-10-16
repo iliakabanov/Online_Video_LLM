@@ -21,7 +21,7 @@ def settings(path, classes=None):
 def video_inputs():
     # Two frames -> one temporal patch, 2x2 spatial patches -> one visual token.
     ids = torch.tensor([[5, 6, 62, 61, 63]])
-    return dict(input_ids=ids, attention_mask=torch.ones_like(ids),
+    return dict(input_ids=ids, attention_mask=torch.ones_like(ids), mm_token_type_ids=(ids == 61).long() * 2,
                 pixel_values_videos=torch.randn(4, 24),
                 video_grid_thw=torch.tensor([[1, 2, 2]]), second_per_grid_ts=[1.0])
 
