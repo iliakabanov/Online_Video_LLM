@@ -1,5 +1,12 @@
-# data and training outputs are rebuilt / downloaded by scripts, never committed
-/data/
+# data and training outputs are rebuilt / downloaded by scripts, never committed;
+# except the group-1 training subset (dataset_builders/clevrer_proactive/subset.py, ~100 MB, every file < 50 MB)
+/data/*
+!/data/processed/
+/data/processed/*
+!/data/processed/clevrer_proactive/
+/data/processed/clevrer_proactive/*
+!/data/processed/clevrer_proactive/*_group1.json
+!/data/processed/clevrer_proactive/*_group1.jsonl
 /outputs/
 /checkpoints/
 *.pkl
