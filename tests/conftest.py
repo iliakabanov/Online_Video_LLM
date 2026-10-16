@@ -1,6 +1,43 @@
 import pytest
 
 
+@pytest.fixture
+def builder():
+    """Real Qwen processor around a toy word-level tokenizer; 2x2 patches, 2 frames per temporal patch."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import (
+        PreTrainedTokenizerFast, Qwen2_5_VLProcessor, Qwen2VLImageProcessor, Qwen2VLVideoProcessor,
+    )
+
+    from online_vllm.data.inputs import InputBuilder
+
+    tokens = ["<unk>", "<pad>", "<|image_pad|>", "<|video_pad|>",
+              "<|vision_start|>", "<|vision_end|>", "question", "assistant", "<|im_end|>", "green"]
+    tokenizer = Tokenizer(WordLevel({t: i for i, t in enumerate(tokens)}, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer, unk_token="<unk>", pad_token="<pad>", eos_token="<|im_end|>",
+        additional_special_tokens=tokens[2:6],
+    )
+    template = (
+        "{{ messages[0]['content'][0]['text'] }} "
+        "<|vision_start|><|video_pad|><|vision_end|>"
+        "{% if add_generation_prompt %} assistant{% endif %}"
+    )
+    processor = Qwen2_5_VLProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(),
+        video_processor=Qwen2VLVideoProcessor(
+            size={"shortest_edge": 16, "longest_edge": 16},
+            patch_size=2, temporal_patch_size=2, merge_size=2,
+        ),
+        chat_template=template,
+    )
+    return InputBuilder(processor)
+
+
 @pytest.fixture(scope="session")
 def tiny_base(tmp_path_factory):
     import torch

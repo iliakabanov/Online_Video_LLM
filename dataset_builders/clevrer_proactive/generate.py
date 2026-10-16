@@ -33,7 +33,7 @@ from .paths import PROCESSED, RAW
 
 BASE = Cfg(th=0.04, collisions="any")
 VARIANTS = [replace(BASE, th=0.02), replace(BASE, th=0.08), replace(BASE, collisions="both")]
-MIN_LEAD, TIE, SHIFT, ACCEPT, SUSTAIN = 25, 3, 5, 12, 3
+MIN_LEAD, TIE, SHIFT, SUSTAIN = 25, 3, 5, 3
 COLORS = ["gray", "red", "blue", "green", "brown", "yellow", "cyan", "purple"]
 PLURAL = {"cube": "cubes", "sphere": "spheres", "cylinder": "cylinders"}
 OUT = PROCESSED
@@ -350,7 +350,7 @@ def generate_scene(sid, s, split, qs, drops):
     def emit(group, family, source, question, atype, choices, answers, extra=None):
         out.append({"id": f"{split}_{sid}_{family}_{len(out)}", "video": vid, "scene_index": sid, "split": split, "group": group,
                     "family": family, "source": source, "question": question, "answer_type": atype, "choices": choices,
-                    "ask_frame": 0, "answers": answers, "accept_frames": ACCEPT, **(extra or {})})
+                    "ask_frame": 0, "answers": answers, **(extra or {})})
 
     def robust_g1(fn):
         a = group1(fn(states[0])) if fn(states[0]) is not None else None

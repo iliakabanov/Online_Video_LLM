@@ -38,6 +38,6 @@ def test_common_schema(split):
     n = 0
     for r in load_jsonl(path):
         r.check()
-        assert abs(r.answers[-1].end - r.duration) < 1e-6
+        assert r.answers[-1].end_frame == r.num_frames - 1
         n += 1
     assert n > 0

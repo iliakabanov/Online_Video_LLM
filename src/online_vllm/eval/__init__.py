@@ -1,1 +1,1 @@
-"""Evaluation of proactive answering: correctness, timeliness (accept window), premature / missed answers."""
+"""Evaluation of proactive answering: correctness, timeliness, premature / missed answers."""

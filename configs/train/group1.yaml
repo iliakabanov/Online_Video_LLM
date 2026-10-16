@@ -1,0 +1,10 @@
+# Training on CLEVRER-Proactive group 1 (one answer that appears once and does not change).
+video:
+  frame_stride: 1          # the model sees every k-th source frame
+  frame_size: [252, 168]   # [width, height] the frames are resized to; multiples of 28 (Qwen patch 14 x merge 2)
+labels:
+  speak_delay: 10          # w, in model frames: silent before S, prepare on [S, S + w), speak on the first patch end >= S + w
+loss:
+  focal_gamma: 2.0
+  class_alpha: {silent: 0.25, prepare: 1.0, speak: 1.0}
+  lm_weight: 1.0           # 0: no answer tokens in the sequence, state loss only

@@ -1,6 +1,6 @@
 """A first training subset of <split>_balanced.json: group 1 only, no cause-effect questions, no "no" that is known only
 at the end of the video. Written in both formats: <PROCESSED>/<name>.json (generator format, frames) and
-<PROCESSED>/<name>.jsonl (common schema, seconds; as export.py).
+<PROCESSED>/<name>.jsonl (common schema, as export.py).
 
 Dropped:
   - group 2 (an answer per interval);

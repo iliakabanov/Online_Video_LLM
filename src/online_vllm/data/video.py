@@ -13,3 +13,12 @@ def read_frames(path: Path, fps: float, max_side: int | None = None):
     w, h = meta["size"]
     frames = [np.frombuffer(b, np.uint8).reshape(h, w, 3) for b in reader]
     return np.arange(len(frames)) / fps, np.stack(frames) if frames else np.zeros((0, h, w, 3), np.uint8)
+
+
+def read_every(path: Path, stride: int = 1, size: tuple[int, int] | None = None):
+    """Source frames 0, stride, 2 * stride, ... as uint8 [N, H, W, 3], resized to size = (width, height) if given."""
+    reader = imageio_ffmpeg.read_frames(str(path), output_params=["-vf", f"scale={size[0]}:{size[1]}"] if size else None)
+    meta = next(reader)
+    w, h = size or meta["size"]
+    frames = [np.frombuffer(b, np.uint8).reshape(h, w, 3) for i, b in enumerate(reader) if i % stride == 0]
+    return np.stack(frames) if frames else np.zeros((0, h, w, 3), np.uint8)

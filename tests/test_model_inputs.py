@@ -5,44 +5,10 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import Whitespace
-from transformers import (
-    PreTrainedTokenizerFast, Qwen2_5_VLProcessor,
-    Qwen2VLImageProcessor, Qwen2VLVideoProcessor,
-)
 
-from online_vllm.data.inputs import InputBuilder, VideoPrefix
+from online_vllm.data.inputs import VideoPrefix
 from online_vllm.runtime import OnlineController
 from online_vllm.models import BackboneConfig, ModelConfig, build_model
-
-
-@pytest.fixture
-def builder():
-    tokens = ["<unk>", "<pad>", "<|image_pad|>", "<|video_pad|>",
-              "<|vision_start|>", "<|vision_end|>", "question", "assistant"]
-    tokenizer = Tokenizer(WordLevel({t: i for i, t in enumerate(tokens)}, unk_token="<unk>"))
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer, unk_token="<unk>", pad_token="<pad>",
-        additional_special_tokens=tokens[2:6],
-    )
-    template = (
-        "{{ messages[0]['content'][0]['text'] }} "
-        "<|vision_start|><|video_pad|><|vision_end|>"
-        "{% if add_generation_prompt %} assistant{% endif %}"
-    )
-    processor = Qwen2_5_VLProcessor(
-        tokenizer=tokenizer,
-        image_processor=Qwen2VLImageProcessor(),
-        video_processor=Qwen2VLVideoProcessor(
-            size={"shortest_edge": 16, "longest_edge": 16},
-            patch_size=2, temporal_patch_size=2, merge_size=2,
-        ),
-        chat_template=template,
-    )
-    return InputBuilder(processor)
 
 
 def test_processor_excludes_future_and_packs_video(builder):
