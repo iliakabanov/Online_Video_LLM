@@ -14,6 +14,7 @@ features:                  # src/online_vllm/train/FEATURES.md
   prev_pairs: 3                 # extraction: attention groups for pairs p-1 .. p-3 one by one, earlier pairs as one
   top_tokens: 10                # extraction: largest log-probabilities of the vocabulary at the probe
   inputs: [lm_last@36]          # training: feature groups the head reads, concatenated (FeatureSet.rows)
+  batch_size: 4                 # extraction: questions per forward pass; roughly +1 GB of GPU memory per question
   shard_gb: 20                  # extraction: a shard of whole videos is closed once it reaches this size (GB)
   upload: true                  # extraction: copy every closed shard to Google Drive, then delete it locally
   remote: gdrive                # rclone remote (rclone config) for the copies

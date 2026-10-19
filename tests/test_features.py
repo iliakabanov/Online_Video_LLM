@@ -137,8 +137,10 @@ def entropy(row, visible):
     return float(-(row * row.log()).sum() / np.log(visible))
 
 
-def test_features_match_reference(setup):
+@pytest.mark.parametrize("batch_size", [1, 2, 3])  # 3: prompts of different lengths and two videos in one batch
+def test_features_match_reference(setup, batch_size):
     data, records, config, model, builder = setup
+    config.features.batch_size = batch_size
     out = run_extract(setup)
     fs = FeatureSet(out)
     meta = fs.meta

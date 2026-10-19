@@ -31,6 +31,7 @@ class FeaturesConfig:
     # closed shard is copied to the Drive folder `remote_folder` through the rclone remote `remote` and deleted locally.
     shard_gb: float = 20.0
     upload: bool = False
+    batch_size: int = 1  # extraction: questions per forward pass (right-padded; GPU memory grows with it)
     remote: str | None = None
     remote_folder: str | None = None
 
@@ -112,8 +113,8 @@ class TrainConfig:
             raise ValueError("lm_layers must be nonempty and >= 1, vis_layers nonempty and >= 0")
         if f.prev_pairs < 0 or f.top_tokens < 1 or not f.inputs:
             raise ValueError("prev_pairs must be >= 0, top_tokens >= 1, inputs nonempty")
-        if f.shard_gb <= 0:
-            raise ValueError("shard_gb must be positive")
+        if f.shard_gb <= 0 or f.batch_size < 1:
+            raise ValueError("shard_gb and batch_size must be positive")
         if f.upload and not (f.remote and f.remote_folder):
             raise ValueError("upload needs features.remote and features.remote_folder")
 
