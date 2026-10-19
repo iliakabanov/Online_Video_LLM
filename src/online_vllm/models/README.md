@@ -40,7 +40,7 @@ Loss, создание меток `prepare/speak`, optimizer и расписан
 ## Проверка
 
 ```powershell
-python -m pip install -e ".[train,dev]"
+python -m pip install -r requirements.txt
 python -m pytest tests/test_model_structure.py tests/test_model_inputs.py -q
 ```
 

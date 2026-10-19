@@ -6,10 +6,20 @@ import torch
 from transformers import AutoProcessor
 
 IGNORE = -100
+LETTERS = "ABCDEFGH"
+INSTRUCTION = "Answer with the letter of the correct option."
 
 
 def format_prompt(question: str, choices: list[str]) -> str:
-    return f"{question}\nOptions: {', '.join(choices)}"
+    """Options lettered A, B, ...: every option is then a single token the model can answer with."""
+    if len(choices) > len(LETTERS):
+        raise ValueError(f"At most {len(LETTERS)} options")
+    options = "\n".join(f"{letter}. {choice}" for letter, choice in zip(LETTERS, choices))
+    return f"{question}\nOptions:\n{options}\n{INSTRUCTION}"
+
+
+def answer_letter(choices: list[str], answer: str) -> str:
+    return LETTERS[choices.index(answer)]
 
 
 @dataclass(frozen=True)

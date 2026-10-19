@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 
-from .inputs import IGNORE, InputBuilder, format_prompt
+from .inputs import IGNORE, InputBuilder, answer_letter, format_prompt
 from .labels import plan
 from .schema import load_jsonl
 from .video import read_every
@@ -36,7 +36,8 @@ class ProactiveDataset(torch.utils.data.Dataset):
             raise ValueError(f"{r.id}: decoded {len(frames)} frames, need {p.num_frames}")
         return self.builder.build_sequence(
             format_prompt(r.question, r.choices), frames[:p.num_frames], r.fps / self.video.frame_stride,
-            [self.class_ids[label] for label in p.labels], p.answer if self.with_answer else None,
+            [self.class_ids[label] for label in p.labels],
+            answer_letter(r.choices, p.answer) if self.with_answer else None,
         )
 
 

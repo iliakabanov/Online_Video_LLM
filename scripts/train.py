@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 
+import _paths  # noqa: F401  (src/ on the path)
 from online_vllm.data.inputs import InputBuilder
 from online_vllm.models import ModelConfig, build_model
 from online_vllm.train.config import TrainConfig

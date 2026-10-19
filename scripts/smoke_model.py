@@ -9,6 +9,7 @@ import logging
 import numpy as np
 import torch
 
+import _paths  # noqa: F401  (src/ on the path)
 from online_vllm.data.inputs import InputBuilder, VideoPrefix
 from online_vllm.models import ModelConfig, build_model
 

@@ -8,9 +8,19 @@ from typing import Literal
 
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from .config import ModelConfig
 from .heads import StateHead
+
+# Qwen's grouped-query attention (16 query heads, 2 key/value heads) reaches SDPA with enable_gqa; without flash
+# attention (absent from Windows builds of PyTorch) only cuDNN runs that fused, otherwise the math kernel materializes
+# every [heads, length, length] score matrix in float32 (~750 MB per layer at 3500 tokens). cuDNN is off by default.
+ATTENTION = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+
+
+def attention_kernels():
+    return sdpa_kernel(ATTENTION, set_priority=True)
 
 
 @dataclass
@@ -46,7 +56,7 @@ class VideoStateModel(nn.Module):
         # Calling Qwen.model avoids the vocabulary projection entirely. A frozen backbone keeps no activations:
         # the head's backward pass does not need them.
         trainable = torch.is_grad_enabled() and any(p.requires_grad for p in self.backbone.parameters())
-        with torch.set_grad_enabled(trainable):
+        with torch.set_grad_enabled(trainable), attention_kernels():
             return self.qwen.model(**kwargs).last_hidden_state
 
     def decision_features(self, inputs: dict, decision_mask: torch.Tensor) -> torch.Tensor:
@@ -67,7 +77,8 @@ class VideoStateModel(nn.Module):
             raise ValueError(f"Unknown mode: {mode}")
         kwargs = self._fresh_inputs(inputs)
         if mode == "language":
-            return self.backbone(**kwargs)
+            with attention_kernels():
+                return self.backbone(**kwargs)
         if "labels" in inputs:
             raise ValueError("Classification targets belong in the external loss, not model inputs")
         if mode == "decisions":
@@ -106,7 +117,8 @@ class VideoStateModel(nn.Module):
         # Default is full-prefix recomputation; a caller may enable cache within this answer.
         options.setdefault("use_cache", False)
         try:
-            sequences = self.backbone.generate(**options)
+            with attention_kernels():
+                sequences = self.backbone.generate(**options)
             return sequences[:, inputs["input_ids"].shape[1]:]
         finally:
             self.qwen.model.rope_deltas = None

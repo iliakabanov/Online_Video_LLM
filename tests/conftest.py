@@ -14,7 +14,8 @@ def builder():
     from online_vllm.data.inputs import InputBuilder
 
     tokens = ["<unk>", "<pad>", "<|image_pad|>", "<|video_pad|>",
-              "<|vision_start|>", "<|vision_end|>", "question", "assistant", "<|im_end|>", "green"]
+              "<|vision_start|>", "<|vision_end|>", "question", "assistant", "<|im_end|>", "green",
+              "A", "B", "C", "D"]
     tokenizer = Tokenizer(WordLevel({t: i for i, t in enumerate(tokens)}, unk_token="<unk>"))
     tokenizer.pre_tokenizer = Whitespace()
     tokenizer = PreTrainedTokenizerFast(

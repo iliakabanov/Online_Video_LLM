@@ -40,7 +40,7 @@ outputs/                      не в git: чекпоинты, логи, рез�
 ## Установка и подготовка данных
 
 ```bash
-pip install -e ".[train,dev]"
+pip install -r requirements.txt   # пакет репозитория не устанавливается: скрипты и pytest сами находят src/
 bash scripts/prepare_clevrer_proactive.sh      # ~10 минут: вопросы и аннотации CLEVRER, генерация, балансировка, экспорт, тесты
 VIDEOS=all bash scripts/prepare_clevrer_proactive.sh   # плюс 18,6 ГБ видео train + validation (нужны для обучения)
 ```

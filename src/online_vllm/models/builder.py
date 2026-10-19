@@ -7,6 +7,7 @@ import torch
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
 
+from . import positions
 from .config import ModelConfig
 from .model import VideoStateModel
 
@@ -63,6 +64,7 @@ def build_model(config: ModelConfig, *, local_files_only: bool = False, device: 
         device_map=device,
         quantization_config=quantization,
     )
+    positions.install(base.model)  # transformers 5.3 gives all frames of a video the same positions
     # Preserve the resolved Hub commit in checkpoints even if the caller used a branch name.
     revision = getattr(base.config, "_commit_hash", None)
     if revision:
@@ -76,6 +78,8 @@ def build_model(config: ModelConfig, *, local_files_only: bool = False, device: 
             r=config.lora.r, lora_alpha=config.lora.alpha,
             lora_dropout=config.lora.dropout, bias="none", target_modules=targets,
         ))
+    if quantization is not None:
+        torch.cuda.empty_cache()  # int8 conversion leaves ~2 GB of freed loading buffers reserved on the GPU
     model = VideoStateModel(base, config)
     logger.info("Trainable parameters: %d / %d",
                 sum(p.numel() for p in model.parameters() if p.requires_grad),

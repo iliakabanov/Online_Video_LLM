@@ -43,10 +43,10 @@ def labelled(fs: FeatureSet, config: TrainConfig, classes: list[str]):
     return items, dropped
 
 
-def gather(fs: FeatureSet, items, full=False):
-    """Features of the batch (only up to the speak patch unless full) as float32, and the concatenated labels."""
-    x = np.concatenate([fs.rows(i, None if full else len(y)) for i, y in items])
-    return torch.from_numpy(x.astype(np.float32)), torch.from_numpy(np.concatenate([y for _, y in items]))
+def gather(fs: FeatureSet, items, inputs, full=False):
+    """The chosen inputs of the batch (only up to the speak patch unless full), and the concatenated labels."""
+    x = np.concatenate([fs.rows(i, None if full else len(y), inputs) for i, y in items])
+    return torch.from_numpy(x), torch.from_numpy(np.concatenate([y for _, y in items]))
 
 
 @torch.no_grad()
@@ -59,7 +59,7 @@ def evaluate(head, fs: FeatureSet, items, config: TrainConfig, alpha, classes, d
     outcomes = {tau: [] for tau in config.eval.taus}
     for b in range(0, len(items), batch_records):
         batch = items[b:b + batch_records]
-        x, _ = gather(fs, batch, full=True)
+        x, _ = gather(fs, batch, config.features.inputs, full=True)
         probs = head(x.to(device)).float().softmax(-1).cpu()
         start = 0
         for i, y in batch:
@@ -133,7 +133,12 @@ def train_head(model_config: ModelConfig, config: TrainConfig, data_root: Path, 
         eval_items = [eval_all[j] for j in sorted(random.Random(config.seed).sample(range(len(eval_all)),
                                                                                     config.data.eval_samples))]
 
-    head = StateHead(train_fs.meta["hidden_size"], model_config.head).to(device)
+    inputs = config.features.inputs
+    if list(inputs) != [f"lm_last@{train_fs.meta['layers']}"]:
+        # The model's own state path feeds the head the last layer at the decision token and nothing else.
+        logger.info("Head inputs %s: the checkpoint is for these features, not loadable by load_checkpoint", inputs)
+    head = StateHead(train_fs.dim(inputs), model_config.head).to(device)
+    logger.info("Head inputs %s: %d features per pair", inputs, train_fs.dim(inputs))
     o = config.optim
     optimizer = torch.optim.AdamW(head.parameters(), lr=o.lr, weight_decay=o.weight_decay)
     batches = math.ceil(len(train_items) / o.batch_size)
@@ -160,7 +165,7 @@ def train_head(model_config: ModelConfig, config: TrainConfig, data_root: Path, 
     for epoch in range(o.epochs):
         order = rng.permutation(len(train_items))
         for b in range(batches):
-            x, y = gather(train_fs, [train_items[j] for j in order[b * o.batch_size:(b + 1) * o.batch_size]])
+            x, y = gather(train_fs, [train_items[j] for j in order[b * o.batch_size:(b + 1) * o.batch_size]], inputs)
             loss = focal_loss(head(x.to(device)), y.to(device), config.loss.focal_gamma, alpha)
             (loss / o.grad_accum).backward()
             running.append(loss.item())

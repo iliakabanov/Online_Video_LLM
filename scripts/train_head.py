@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 
+import _paths  # noqa: F401  (src/ on the path)
 from online_vllm.models import ModelConfig
 from online_vllm.train.config import TrainConfig
 from online_vllm.train.head import train_head

@@ -14,9 +14,25 @@ class DataConfig:
 
 @dataclass
 class FeaturesConfig:
-    """Cached backbone features of data.train / data.eval (train/features.py), relative to DATA_ROOT."""
-    train: str = "features/group1_s1_252x168_int8/train"
-    eval: str = "features/group1_s1_252x168_int8/val"
+    """Cached backbone features of data.train / data.eval (train/features.py, FEATURES.md), relative to DATA_ROOT.
+
+    Extraction: lm_layers are language-model layers 1..N (N: after the final norm), vis_layers vision-encoder blocks
+    from 0; attention groups the previous `prev_pairs` pairs one by one; the probe keeps the `top_tokens` largest
+    log-probabilities of the vocabulary. Training: `inputs` are the feature groups the head reads, concatenated
+    (train/features.py FeatureSet.rows)."""
+    train: str = "features/group1_s1_252x168/train"
+    eval: str = "features/group1_s1_252x168/val"
+    lm_layers: list[int] = field(default_factory=lambda: [12, 18, 24, 36])
+    vis_layers: list[int] = field(default_factory=lambda: [7, 15, 23, 31])
+    prev_pairs: int = 3
+    top_tokens: int = 10
+    inputs: list[str] = field(default_factory=lambda: ["lm_last@36"])
+    # Storage: features are written in shards of whole videos, each closed once it reaches shard_gb. With upload, every
+    # closed shard is copied to the Drive folder `remote_folder` through the rclone remote `remote` and deleted locally.
+    shard_gb: float = 20.0
+    upload: bool = False
+    remote: str | None = None
+    remote_folder: str | None = None
 
 
 @dataclass
@@ -91,6 +107,15 @@ class TrainConfig:
             raise ValueError("eval_samples must be null or positive")
         if any(not 0 < t < 1 for t in self.eval.taus):
             raise ValueError("eval taus must be in (0, 1)")
+        f = self.features
+        if not f.lm_layers or min(f.lm_layers) < 1 or not f.vis_layers or min(f.vis_layers) < 0:
+            raise ValueError("lm_layers must be nonempty and >= 1, vis_layers nonempty and >= 0")
+        if f.prev_pairs < 0 or f.top_tokens < 1 or not f.inputs:
+            raise ValueError("prev_pairs must be >= 0, top_tokens >= 1, inputs nonempty")
+        if f.shard_gb <= 0:
+            raise ValueError("shard_gb must be positive")
+        if f.upload and not (f.remote and f.remote_folder):
+            raise ValueError("upload needs features.remote and features.remote_folder")
 
     @classmethod
     def from_dict(cls, values):

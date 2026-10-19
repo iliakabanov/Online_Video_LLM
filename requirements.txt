@@ -1,0 +1,15 @@
+# Python >= 3.10: pip install -r requirements.txt
+# The repository itself is not installed: scripts/, `python -m dataset_builders...` and pytest put src/ on the path.
+numpy
+pyyaml
+tqdm
+imageio-ffmpeg
+fsspec
+aiohttp                    # fsspec https backend: reading single members of the remote CLEVRER zips
+torch>=2.5
+torchvision
+transformers>=5.3,<5.4
+peft>=0.18,<0.19
+accelerate
+bitsandbytes               # quantization: 8bit in the model config
+pytest
