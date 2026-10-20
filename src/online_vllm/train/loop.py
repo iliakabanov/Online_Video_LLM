@@ -17,11 +17,12 @@ from torch.utils.data import DataLoader, Subset
 from ..data.dataset import ProactiveDataset, collate
 from ..data.inputs import IGNORE
 from ..models import save_checkpoint
+from ..eval.metrics import evaluate_readiness, flatten_readiness_metrics, statehead_probabilities
 from .config import TrainConfig
 from .loss import class_weights, focal_loss
 
 logger = logging.getLogger(__name__)
-LABELS = ("state_labels", "lm_labels")
+LABELS = ("state_labels", "lm_labels", "readiness_meta")
 
 
 def seed_everything(seed: int):
@@ -49,23 +50,38 @@ def decision_loss(model, batch, config: TrainConfig, alpha):
 
 @torch.no_grad()
 def evaluate(model, loader, config: TrainConfig, alpha, device) -> dict:
-    """Loss, accuracy and per-class recall over the decision positions; confusion[true][predicted]."""
+    """Общая hard-GT readiness-оценка для StateHead с backbone."""
     classes = model.config.head.classes
     training = model.training
     model.eval()
     total, count = 0.0, 0
-    confusion = torch.zeros(len(classes), len(classes), dtype=torch.long)
+    probabilities, target_pairs, visible_pairs, fps = [], [], [], []
     for batch in loader:
-        loss, logits, target = decision_loss(model, {k: v.to(device) for k, v in batch.items()}, config, alpha)
+        moved = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        loss, logits, target = decision_loss(model, moved, config, alpha)
         total += loss.item() * len(target)
         count += len(target)
-        confusion.index_put_((target.cpu(), logits.argmax(-1).cpu()), torch.tensor(1), accumulate=True)
+        binary = statehead_probabilities(logits.cpu(), classes)
+        offset = 0
+        for metadata in batch["readiness_meta"]:
+            n = metadata["target_pair"] + 1
+            probabilities.append(binary[offset:offset + n])
+            target_pairs.append(metadata["target_pair"])
+            visible_pairs.append(metadata["visible_pair"])
+            fps.append(metadata["fps"])
+            offset += n
+        if offset != len(binary):
+            raise RuntimeError("Decision logits and sequence metadata are inconsistent")
     model.train(training)
-    metrics = {"eval_loss": total / count, "eval_accuracy": confusion.diag().sum().item() / count}
-    for i, c in enumerate(classes):
-        metrics[f"eval_recall_{c}"] = confusion[i, i].item() / max(1, confusion[i].sum().item())
-    metrics["eval_confusion"] = confusion.tolist()
-    return metrics
+    width = max(map(len, probabilities))
+    p = np.zeros((len(probabilities), width)); valid = np.zeros_like(p, dtype=bool)
+    for row, mask, value in zip(p, valid, probabilities):
+        row[:len(value)] = value; mask[:len(value)] = True
+    dataset = loader.dataset.dataset if isinstance(loader.dataset, Subset) else loader.dataset
+    result = evaluate_readiness(p, target_pairs, visible_pairs, config.eval.taus, dataset.builder.temporal_patch,
+                                config.video.frame_stride, valid, fps, model="statehead")
+    return {"eval_loss": total / count, "eval_target_focal_loss": total / count,
+            **flatten_readiness_metrics(result)}
 
 
 def train(model, builder, config: TrainConfig, data_root: Path, output_dir: Path, device) -> Path:
@@ -120,7 +136,8 @@ def train(model, builder, config: TrainConfig, data_root: Path, output_dir: Path
 
     for epoch in range(o.epochs):
         for i, batch in enumerate(train_loader):
-            loss, _, _ = decision_loss(model, {k: v.to(device) for k, v in batch.items()}, config, alpha)
+            moved = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            loss, _, _ = decision_loss(model, moved, config, alpha)
             (loss / o.grad_accum).backward()
             running.append(loss.item())
             if (i + 1) % o.grad_accum and i + 1 < len(train_loader):

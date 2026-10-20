@@ -57,6 +57,7 @@ class LossConfig:
     focal_gamma: float = 2.0
     class_alpha: dict[str, float] = field(default_factory=lambda: {"silent": 0.25, "prepare": 1.0, "speak": 1.0})
     lm_weight: float = 0.0
+    binary_reduction: str = "patch_mean"  # patch_mean или sequence_mean для readiness BCE
 
 
 @dataclass
@@ -95,6 +96,8 @@ class TrainConfig:
             raise ValueError("speak_delay must be >= 0")
         if self.loss.focal_gamma < 0 or self.loss.lm_weight < 0:
             raise ValueError("focal_gamma and lm_weight must be >= 0")
+        if self.loss.binary_reduction not in {"patch_mean", "sequence_mean"}:
+            raise ValueError("binary_reduction must be patch_mean or sequence_mean")
         if any(a < 0 for a in self.loss.class_alpha.values()):
             raise ValueError("class_alpha values must be >= 0")
         o = self.optim

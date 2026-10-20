@@ -34,11 +34,16 @@ class ProactiveDataset(torch.utils.data.Dataset):
         frames = read_every(self.data_root / r.video, self.video.frame_stride, tuple(self.video.frame_size))
         if len(frames) < p.num_frames:
             raise ValueError(f"{r.id}: decoded {len(frames)} frames, need {p.num_frames}")
-        return self.builder.build_sequence(
+        result = self.builder.build_sequence(
             format_prompt(r.question, r.choices), frames[:p.num_frames], r.fps / self.video.frame_stride,
             [self.class_ids[label] for label in p.labels],
             answer_letter(r.choices, p.answer) if self.with_answer else None,
         )
+        # Не подаётся в модель: metadata нужна общей evaluation-функции.
+        result["readiness_meta"] = {"target_pair": len(p.labels) - 1,
+                                    "visible_pair": next(j for j, label in enumerate(p.labels) if label != "silent"),
+                                    "fps": r.fps}
+        return result
 
 
 def collate(examples, pad_id: int):
@@ -49,7 +54,7 @@ def collate(examples, pad_id: int):
         return torch.cat([torch.nn.functional.pad(e[key], (0, length - e[key].shape[1]), value=value)
                           for e in examples])
 
-    return {
+    result = {
         "input_ids": pad("input_ids", pad_id),
         "attention_mask": pad("attention_mask", 0),
         "mm_token_type_ids": pad("mm_token_type_ids", 0),
@@ -59,3 +64,7 @@ def collate(examples, pad_id: int):
         "video_grid_thw": torch.cat([e["video_grid_thw"] for e in examples]),
         "second_per_grid_ts": torch.cat([torch.as_tensor(e["second_per_grid_ts"]) for e in examples]),
     }
+    # Низкоуровневые tests/build_sequence вправе вызвать collate без Dataset.
+    if all("readiness_meta" in example for example in examples):
+        result["readiness_meta"] = [e["readiness_meta"] for e in examples]
+    return result

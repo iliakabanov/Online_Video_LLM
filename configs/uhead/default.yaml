@@ -1,0 +1,15 @@
+# Causal adaptation of https://github.com/IINemo/llm-uncertainty-head
+groups: [lm, attention, entropy, vision, confidence]
+projection_dims:
+  lm: 256
+  attention: 256
+  entropy: 64
+  vision: 128
+  confidence: 32
+projection_hidden_dims: {}
+model_dim: 512
+nhead: 8
+num_layers: 2
+dropout: 0.1
+normalization_eps: 1.0e-6
+temporal_detector: transformer

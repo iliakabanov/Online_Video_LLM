@@ -20,6 +20,7 @@ import numpy as np
 import torch
 
 from ..data.labels import SILENT, SPEAK, plan
+from ..eval.metrics import evaluate_readiness, flatten_readiness_metrics, statehead_probabilities
 from ..models import ModelConfig, save_head_checkpoint
 from ..models.heads import StateHead
 from .config import TrainConfig
@@ -51,50 +52,39 @@ def gather(fs: FeatureSet, items, inputs, full=False):
 
 @torch.no_grad()
 def evaluate(head, fs: FeatureSet, items, config: TrainConfig, alpha, classes, device, batch_records=256) -> dict:
+    """Единая readiness-оценка cached StateHead и отдельный training focal loss."""
     training = head.training
     head.eval()
-    speak = classes.index(SPEAK)
     total, count = 0.0, 0
-    confusion = torch.zeros(len(classes), len(classes), dtype=torch.long)
-    outcomes = {tau: [] for tau in config.eval.taus}
+    probabilities, target_pairs, visible_pairs, fps = [], [], [], []
     for b in range(0, len(items), batch_records):
         batch = items[b:b + batch_records]
         x, _ = gather(fs, batch, config.features.inputs, full=True)
-        probs = head(x.to(device)).float().softmax(-1).cpu()
+        state_logits = head(x.to(device)).float().cpu()
+        probs = torch.from_numpy(statehead_probabilities(state_logits, classes))
         start = 0
         for i, y in batch:
             p = probs[start:start + fs.patches[i]]
             start += fs.patches[i]
-            logits = torch.log(p[:len(y)].clamp_min(1e-12))  # log-probabilities give the same loss as logits
+            logits = state_logits[start - fs.patches[i]:start - fs.patches[i] + len(y)]
             target = torch.from_numpy(y)
             total += focal_loss(logits, target, config.loss.focal_gamma, alpha).item() * len(y)
             count += len(y)
-            confusion.index_put_((target, p[:len(y)].argmax(-1)), torch.tensor(1), accumulate=True)
+            probabilities.append(p.numpy())
             visible = int(np.argmax(y != classes.index(SILENT)))  # first patch at which the answer is visible
-            target_patch = len(y) - 1
-            for tau in config.eval.taus:
-                fired = (p[:, speak] > tau).nonzero()
-                outcomes[tau].append((None if len(fired) == 0 else int(fired[0]), visible, target_patch))
+            target_pairs.append(len(y) - 1)
+            visible_pairs.append(visible)
+            fps.append(fs.records[i].fps)
     head.train(training)
-    metrics = {"eval_loss": total / count, "eval_accuracy": confusion.diag().sum().item() / count}
-    for i, c in enumerate(classes):
-        metrics[f"eval_recall_{c}"] = confusion[i, i].item() / max(1, confusion[i].sum().item())
-    frames_per_patch = fs.meta["temporal_patch"] * fs.meta["frame_stride"]
-    for tau, rows in outcomes.items():
-        kinds = {"premature": 0, "early": 0, "on_target": 0, "late": 0, "missed": 0}
-        delays = []
-        for fired, visible, target in rows:
-            if fired is None:
-                kinds["missed"] += 1
-                continue
-            kinds["premature" if fired < visible else "early" if fired < target else
-                  "on_target" if fired == target else "late"] += 1
-            if fired >= visible:
-                delays.append((fired - target) * frames_per_patch)
-        for k, v in kinds.items():
-            metrics[f"online_{tau}_{k}"] = v / len(rows)
-        metrics[f"online_{tau}_median_delay_frames"] = float(np.median(delays)) if delays else None
-    metrics["eval_confusion"] = confusion.tolist()
+    max_length = max(map(len, probabilities))
+    padded = np.zeros((len(probabilities), max_length), dtype=float)
+    valid_mask = np.zeros_like(padded, dtype=bool)
+    for row, mask, probability in zip(padded, valid_mask, probabilities):
+        row[:len(probability)] = probability; mask[:len(probability)] = True
+    result = evaluate_readiness(padded, target_pairs, visible_pairs, config.eval.taus, fs.meta["temporal_patch"],
+                                fs.meta["frame_stride"], valid_mask, fps, model="statehead")
+    metrics = {"eval_loss": total / count, "eval_target_focal_loss": total / count,
+               **flatten_readiness_metrics(result)}
     return metrics
 
 
