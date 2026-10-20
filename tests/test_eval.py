@@ -104,6 +104,7 @@ def test_choice_probabilities_and_answer_curves():
     result = answer_curves([trace], offsets=range(-1, 2))
     assert result["levels"]["chance"] == .5
     assert result["levels"]["before_visible"]["accuracy"] == 1.0
+    assert result["levels"]["first_pair"]["accuracy"] == 1.0 and result["levels"]["first_pair"]["count"] == 1
     assert result["levels"]["at_target"] == pytest.approx({"count": 1, "accuracy": 0.0, "p_correct": .25,
                                                            "p_answer": .75, "chance": .5})
     assert [row["count"] for row in result["curve"]] == [1, 1, 0]

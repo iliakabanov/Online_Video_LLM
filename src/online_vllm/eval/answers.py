@@ -84,6 +84,8 @@ def answer_curves(traces: list[AnswerTrace], offsets=range(-10, 21)) -> dict:
             raise ValueError("Нужны 0 <= visible_pair <= target_pair < числа пар")
     levels = {
         "chance": float(np.mean([1 / t.probabilities.shape[1] for t in traces])),
+        # Только первая пара видео (начальная расстановка, без движения); вопросы, где ответ виден уже на ней, не входят.
+        "first_pair": _stats([(t, 0) for t in traces if t.visible_pair >= 1]),
         "before_visible": _stats([(t, t.visible_pair - 1) for t in traces if t.visible_pair >= 1]),
         "at_target": _stats([(t, t.target_pair) for t in traces]),
         "at_end": _stats([(t, len(t.probabilities) - 1) for t in traces]),
@@ -184,9 +186,10 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     levels = result["levels"]
-    print(f"{result['questions']} вопросов; угадывание {levels['chance']:.3f}; точность перед появлением ответа "
-          f"{levels['before_visible']['accuracy']}, на целевой паре {levels['at_target']['accuracy']:.3f}, "
-          f"в конце видео {levels['at_end']['accuracy']:.3f}")
+    fmt = lambda level: "—" if level["accuracy"] is None else f"{level['accuracy']:.3f} (n = {level['count']})"
+    print(f"{result['questions']} вопросов; угадывание {levels['chance']:.3f}; точность на первой паре "
+          f"{fmt(levels['first_pair'])}, перед появлением ответа {fmt(levels['before_visible'])}, "
+          f"на целевой паре {fmt(levels['at_target'])}, в конце видео {fmt(levels['at_end'])}")
     if args.plot:
         plot_curves(result, args.plot, f"{Path(args.features).name}: {result['questions']} вопросов, "
                                        f"speak_delay = {config.labels.speak_delay}")
