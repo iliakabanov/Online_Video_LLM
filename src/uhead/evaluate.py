@@ -1,8 +1,9 @@
 """Оценка обученного детектора на test-половине eval с заданным порогом, без загрузки Qwen.
 
-Test — видео из split.json каталога запуска (uhead.train). Порог выбирается по метрикам validation в results.json.
+Test — видео из split.json каталога весов (uhead.train --output). Порог выбирается по метрикам validation в
+results.json. Отчёт и вероятности пишутся в --results (по умолчанию в каталог весов).
 
-PYTHONPATH=src python -m uhead.evaluate --run experiment_launcher/checkpoints/mlp/01_lm --threshold 0.7
+PYTHONPATH=src python -m uhead.evaluate --run checkpoints/mlp/01_lm --results results/mlp/01_lm --threshold 0.7
 """
 import argparse
 import json
@@ -18,8 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, device="cpu",
-                  weights: str = "best.pt", output: str | Path | None = None) -> dict:
-    """Метрики весов run_dir/weights на test-видео из split.json при пороге threshold; пишет JSON и вероятности."""
+                  weights: str = "best.pt", output: str | Path | None = None,
+                  results_dir: str | Path | None = None) -> dict:
+    """Метрики весов run_dir/weights на test-видео из split.json при пороге threshold; пишет JSON и вероятности
+    (output, по умолчанию <results_dir или run_dir>/test_<weights>_tau<threshold>.json)."""
     from online_vllm.train.config import TrainConfig
     from online_vllm.train.features import FeatureSet
     from .data import ReadinessDataset, labelled
@@ -47,7 +50,8 @@ def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, 
                "weights": str(run_dir / weights), "threshold": threshold, "questions": len(rows),
                "videos": len(split["test_videos"]), "loss": loss, "classification": result["classification"],
                "online": result["thresholds"][str(threshold)]}
-    output = Path(output) if output else run_dir / f"test_{Path(weights).stem}_tau{threshold}.json"
+    output = Path(output) if output else (Path(results_dir) if results_dir else run_dir) / \
+        f"test_{Path(weights).stem}_tau{threshold}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     _write_predictions(output.with_name(f"predictions_{output.stem}.json"), rows, fs.meta, model_name,
@@ -58,15 +62,16 @@ def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run", required=True, help="каталог запуска uhead.train (train.yaml, split.json, *.pt)")
+    parser.add_argument("--run", required=True, help="каталог весов uhead.train (train.yaml, split.json, *.pt)")
+    parser.add_argument("--results", help="каталог результатов этого запуска; по умолчанию --run")
     parser.add_argument("--threshold", type=float, required=True, help="порог P(готовность), выбранный на validation")
     parser.add_argument("--weights", default="best.pt", help="best.pt или last.pt")
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", "data"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", help="по умолчанию <run>/test_<weights>_tau<threshold>.json")
+    parser.add_argument("--output", help="по умолчанию <results или run>/test_<weights>_tau<threshold>.json")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    evaluate_test(args.run, args.threshold, args.data_root, args.device, args.weights, args.output)
+    evaluate_test(args.run, args.threshold, args.data_root, args.device, args.weights, args.output, args.results)
 
 
 if __name__ == "__main__":

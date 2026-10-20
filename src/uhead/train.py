@@ -189,9 +189,12 @@ def load_checkpoint(path: str | Path, device="cpu", filename: str | None = None)
 
 def train(uhead_config, train_config, data_root: Path, output_dir: Path, device, tags: TagMode = "hard",
           step_window: int = 5, sigmoid_slope: float = 0.65, flat_output: bool = False,
-          overwrite: bool = False) -> Path:
-    """Обучает один из трёх бинарных режимов GT; возвращает каталог запуска с best.pt, last.pt, split.json и
-    results.json (метрики best.pt на validation при каждом пороге)."""
+          overwrite: bool = False, results_dir: Path | None = None) -> Path:
+    """Обучает один из трёх бинарных режимов GT; возвращает каталог запуска.
+
+    В output_dir — то, что нужно для загрузки и оценки модели: best.pt, last.pt, конфиги, tags.json,
+    experiment.json и split.json. В results_dir (по умолчанию тот же каталог) — результаты: metrics.jsonl,
+    results.json (метрики best.pt на validation при каждом пороге) и predictions_validation.json."""
     # Сохраняем работоспособность прежнего scripts/train_uhead.py, который передавал список классов третьим аргументом.
     if isinstance(data_root, list):
         _, data_root, output_dir, device, tags = data_root, output_dir, device, tags, "hard"
@@ -226,9 +229,11 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("Обучаемых параметров: %d", trainable_parameters)
     output_dir = Path(output_dir) if flat_output else Path(output_dir) / tags
-    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
-        raise FileExistsError(f"{output_dir} уже содержит запуск; укажите --overwrite для явной перезаписи")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    results_dir = output_dir if results_dir is None else Path(results_dir) if flat_output else Path(results_dir) / tags
+    for directory in {output_dir, results_dir}:
+        if directory.exists() and any(directory.iterdir()) and not overwrite:
+            raise FileExistsError(f"{directory} уже содержит запуск; укажите --overwrite для явной перезаписи")
+        directory.mkdir(parents=True, exist_ok=True)
     (output_dir / "split.json").write_text(json.dumps(split, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     metadata = {"architecture": uhead_config.temporal_detector, "feature_groups": uhead_config.groups,
                 "training_gt": tags, "seed": train_config.seed, "trainable_parameters": trainable_parameters,
@@ -241,7 +246,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     batches = math.ceil(len(loader) / o.grad_accum)
     total_steps = o.epochs * batches if o.max_steps is None else min(o.epochs * batches, o.max_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, o.warmup_steps, total_steps))
-    log = open(output_dir / "metrics.jsonl", "w", encoding="utf-8")
+    log = open(results_dir / "metrics.jsonl", "w", encoding="utf-8")
     step, best_loss, best_epoch = 0, math.inf, None
 
     def record(metrics):
@@ -287,9 +292,9 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
                        "loss": validation_loss, "classification": validation["classification"],
                        "thresholds": validation["thresholds"]},
     }
-    (output_dir / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-                                             encoding="utf-8")
-    _write_predictions(output_dir / "predictions_validation.json", validation_rows, eval_fs.meta, model_name, tags,
+    (results_dir / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+                                              encoding="utf-8")
+    _write_predictions(results_dir / "predictions_validation.json", validation_rows, eval_fs.meta, model_name, tags,
                        "validation")
     record({"final": True, "best_epoch": best_epoch, "best_validation_loss": best_loss,
             "validation_auroc": validation["classification"]["auroc"],
@@ -306,7 +311,8 @@ def build_parser():
     parser.add_argument("--sigmoid-slope", type=float, default=0.65)
     parser.add_argument("--uhead", default="configs/uhead/default.yaml")
     parser.add_argument("--train", default="configs/train/group1.yaml")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", required=True, help="каталог весов и конфигов (best.pt, last.pt, split.json)")
+    parser.add_argument("--results", help="каталог метрик и предсказаний; по умолчанию тот же, что --output")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", "data"))
     parser.add_argument("--flat-output", action="store_true", help="Не добавлять каталог режима GT к --output")
@@ -322,7 +328,8 @@ def main():
     from online_vllm.train.config import TrainConfig
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     result = train(UHeadConfig.load(args.uhead), TrainConfig.load(args.train), Path(args.data_root), Path(args.output),
-                   args.device, args.tags, args.step_window, args.sigmoid_slope, args.flat_output, args.overwrite)
+                   args.device, args.tags, args.step_window, args.sigmoid_slope, args.flat_output, args.overwrite,
+                   Path(args.results) if args.results else None)
     print("Каталог запуска:", result)
 
 

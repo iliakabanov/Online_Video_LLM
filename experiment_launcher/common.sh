@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Общий запуск: обучение cached-feature detector и метрики на validation-половине VAL_FEATURES при каждом пороге
-# (eval.thresholds в configs/train/group1.yaml). Test-половина оценивается отдельно, с выбранным порогом:
-#   PYTHONPATH=src python -m uhead.evaluate --run experiment_launcher/checkpoints/<arch>/<id> --threshold <tau> \
-#     --data-root "$DATA_ROOT"
+# (eval.thresholds в configs/train/group1.yaml). В корне репозитория:
+#   checkpoints/<arch>/<id>/  веса и всё для их загрузки и оценки: best.pt, last.pt, конфиги, split.json (не в git)
+#   results/<arch>/<id>/      метрики и предсказания: results.json, metrics.jsonl, predictions_validation.json,
+#                             run_config.json
+# Test-половина оценивается отдельно, с выбранным порогом:
+#   PYTHONPATH=src python -m uhead.evaluate --run checkpoints/<arch>/<id> --results results/<arch>/<id> \
+#     --threshold <tau> --data-root "$DATA_ROOT"
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,8 +27,8 @@ run_experiment() {
   [[ "$DATA_ROOT" != "/PATH/TO/DATA" && "$TRAIN_FEATURES" != "/PATH/TO/TRAIN_FEATURES" && "$VAL_FEATURES" != "/PATH/TO/VAL_FEATURES" ]] || {
     echo "Замените DATA_ROOT, TRAIN_FEATURES и VAL_FEATURES перед запуском." >&2; return 2; }
 
-  local checkpoint_dir="$ROOT/experiment_launcher/checkpoints/$architecture/$experiment_id"
-  local result_dir="$ROOT/experiment_launcher/results/$architecture/$experiment_id"
+  local checkpoint_dir="$ROOT/checkpoints/$architecture/$experiment_id"
+  local result_dir="$ROOT/results/$architecture/$experiment_id"
   local train_config uhead_config
   if { [[ -d "$checkpoint_dir" ]] && [[ -n "$(find "$checkpoint_dir" -mindepth 1 -print -quit)" ]]; } || \
      { [[ -d "$result_dir" ]] && [[ -n "$(find "$result_dir" -mindepth 1 -print -quit)" ]]; }; then
@@ -53,15 +57,15 @@ Path(os.environ["UHEAD_CONFIG"]).write_text(yaml.safe_dump(uhead, sort_keys=Fals
 PY
   # Обучение по эпохам (best.pt / last.pt) и метрики best.pt на validation-половине при каждом пороге.
   PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m uhead.train --tags hard --uhead "$uhead_config" \
-    --train "$train_config" --data-root "$DATA_ROOT" --output "$checkpoint_dir" --device "$DEVICE" --flat-output --overwrite
-  cp "$checkpoint_dir"/{results.json,metrics.jsonl,split.json,predictions_validation.json} "$result_dir/"
+    --train "$train_config" --data-root "$DATA_ROOT" --output "$checkpoint_dir" --results "$result_dir" \
+    --device "$DEVICE" --flat-output --overwrite
   ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" FEATURE_GROUPS="${groups[*]}" \
     CHECKPOINT="$checkpoint_dir" RESULT="$result_dir" python - <<'PY'
 import json, os
 from pathlib import Path
 checkpoint = Path(os.environ["CHECKPOINT"])
 config = json.loads(checkpoint.joinpath("experiment.json").read_text(encoding="utf-8"))
-results = json.loads(checkpoint.joinpath("results.json").read_text(encoding="utf-8"))
+results = json.loads(Path(os.environ["RESULT"]).joinpath("results.json").read_text(encoding="utf-8"))
 config.update({
     "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
     "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": "hard", "seed": 0,

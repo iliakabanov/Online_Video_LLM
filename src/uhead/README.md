@@ -54,6 +54,8 @@ PYTHONPATH=src python -m uhead.train --tags sigmoid --sigmoid-slope 0.65 --outpu
 PYTHONPATH=src python -m uhead.evaluate --run outputs/group1_uhead/hard --threshold 0.7 [--weights last.pt]
 ```
 
-Результат — `<run>/test_best_tau0.7.json` (loss, классификационные и онлайн-метрики при этом пороге) и вероятности `predictions_test_best_tau0.7.json`.
+Результат — `test_best_tau0.7.json` (loss, классификационные и онлайн-метрики при этом пороге) и вероятности `predictions_test_best_tau0.7.json`.
+
+Веса и результаты можно разнести по разным каталогам: `--output` получает веса, конфиги и `split.json`, а `--results` (у `uhead.train` и `uhead.evaluate`) — `metrics.jsonl`, `results.json` и предсказания. Без `--results` всё пишется в `--output`. Так делает `experiment_launcher/common.sh`: веса в `checkpoints/<arch>/<id>/` (не в git), результаты в `results/<arch>/<id>/` в корне репозитория.
 
 В каталоге запуска лежат `best.pt` и `last.pt` (веса, включая normalizer buffers), `uhead.yaml`, `train.yaml`, `tags.json`, `experiment.json`. Загрузка: `from uhead.train import load_checkpoint; model = load_checkpoint(".../hard")` (берётся `best.pt`; `last.pt` — через `filename="last.pt"`); `tags = model.tag_settings`.
