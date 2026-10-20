@@ -38,6 +38,8 @@ def sweep(payload: dict, thresholds: list[float]) -> dict:
                    "visible_pairs": [row["visible_pair"] for row in rows],
                    "fps": [row.get("fps") for row in rows],
                    "temporal_patch": metadata.get("temporal_patch"), "frame_stride": metadata.get("frame_stride")}
+        if rows and all("answer_correct" in row for row in rows):
+            payload["answer_correct"] = [row["answer_correct"] for row in rows]
     required = ("probabilities", "target_pairs", "visible_pairs", "temporal_patch", "frame_stride")
     missing = [key for key in required if key not in payload]
     if missing:
@@ -56,7 +58,7 @@ def sweep(payload: dict, thresholds: list[float]) -> dict:
     result = evaluate_readiness(padded, payload["target_pairs"], payload["visible_pairs"], thresholds,
                                 payload["temporal_patch"], payload["frame_stride"], valid_mask,
                                 payload.get("fps"), payload.get("classification_threshold", 0.5), payload.get("model"),
-                                payload.get("tags"))
+                                payload.get("tags"), correct=payload.get("answer_correct"))
     return {"model": result["model"], "tags": result["tags"], "split": payload.get("split"),
             "metadata": metadata,
             "num_videos": result["num_videos"], "thresholds": thresholds,

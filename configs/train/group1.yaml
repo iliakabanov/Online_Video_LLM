@@ -29,10 +29,10 @@ loss:
   class_alpha: {silent: 0.25, prepare: 1.0, speak: 1.0}
   lm_weight: 0.0           # language loss on the answer; not implemented yet, must stay 0
 optim:
-  lr: 1.0e-3
+  lr: 2.0e-4
   weight_decay: 0.01
   warmup_steps: 100        # optimizer steps of linear warmup, then cosine decay to 0
-  epochs: 5
+  epochs: 30
   max_steps: null          # optimizer steps; null: run all epochs
   batch_size: 64           # sequences (questions) per step; scripts/train.py through the backbone needs 1-2
   grad_accum: 1

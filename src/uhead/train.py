@@ -23,6 +23,7 @@ from .config import UHeadConfig
 from .labels import TagMode
 from .model import UHead
 from online_vllm.models.heads import StateHead
+from online_vllm.eval.answers import answer_trace
 from online_vllm.eval.metrics import evaluate_readiness, flatten_readiness_metrics, uhead_probabilities
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,9 @@ def _preserve_rng(callable_):
 
 
 @torch.no_grad()
-def predict(model, dataset, config, device, batch_size=64) -> tuple[float, list[dict]]:
-    """Loss по меткам режима обучения и непаддированные вероятности каждой записи dataset."""
+def predict(model, dataset, config, device, batch_size=64, with_rows=True) -> tuple[float, list[dict]]:
+    """Loss по меткам режима обучения и по каждой записи dataset: непаддированные вероятности готовности и
+    answer_correct — верен ли на каждой паре ответ Qwen по пробе (eval/answers.py). with_rows=False — только loss."""
     from .data import collate
     was_training = model.training
     model.eval()
@@ -88,22 +90,27 @@ def predict(model, dataset, config, device, batch_size=64) -> tuple[float, list[
         weight = len(items) if config.loss.binary_reduction == "sequence_mean" else valid.sum().item()
         total += loss.item() * weight
         count += weight
+        if not with_rows:
+            continue
         probability = uhead_probabilities(logits)
         valid_cpu = valid.cpu().numpy()
         for b, item in enumerate(items):
             record = dataset.fs.records[item.index]
-            rows.append({"record_id": record.id, "probabilities": probability[b, :int(valid_cpu[b].sum())],
-                         "target_pair": item.target_pair, "visible_pair": item.visible_pair, "fps": record.fps})
+            n = int(valid_cpu[b].sum())
+            rows.append({"record_id": record.id, "probabilities": probability[b, :n],
+                         "target_pair": item.target_pair, "visible_pair": item.visible_pair, "fps": record.fps,
+                         "answer_correct": answer_trace(dataset.fs, item.index, n).is_correct})
     model.train(was_training)
     return total / count, rows
 
 
 def _readiness(rows, taus, meta, classification_threshold=0.5, model=None, tags=None) -> dict:
     probabilities, masks = _pad_probabilities([row["probabilities"] for row in rows])
+    correct = [row["answer_correct"] for row in rows] if all("answer_correct" in row for row in rows) else None
     return evaluate_readiness(probabilities, [row["target_pair"] for row in rows],
                               [row["visible_pair"] for row in rows], taus, meta["temporal_patch"],
                               meta["frame_stride"], masks, [row["fps"] for row in rows], classification_threshold,
-                              model=model, tags=tags)
+                              model=model, tags=tags, correct=correct)
 
 
 def evaluate(model, dataset, config, device, batch_size=64):
@@ -140,7 +147,9 @@ def _write_predictions(path: Path, rows, meta, model_name, tags, split):
     """Формат online_vllm.eval.export: его принимает python -m online_vllm.eval.thresholds."""
     payload = {"metadata": {"model": model_name, "tags": tags, "split": split,
                             "temporal_patch": meta["temporal_patch"], "frame_stride": meta["frame_stride"]},
-               "predictions": [{**row, "probabilities": row["probabilities"].tolist()} for row in rows]}
+               "predictions": [{**row, "probabilities": row["probabilities"].tolist(),
+                                "answer_correct": np.asarray(row["answer_correct"], dtype=bool).tolist()}
+                               for row in rows]}
     path.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
 
 
@@ -271,12 +280,14 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); step += 1
             if step >= total_steps:
                 break
-        validation = _preserve_rng(lambda: evaluate(model, validation_data, train_config, device, o.batch_size))
+        # После эпохи — только validation loss (по нему выбирается best.pt); метрики считаются в конце обучения.
+        validation_loss = _preserve_rng(lambda: predict(model, validation_data, train_config, device, o.batch_size,
+                                                        with_rows=False)[0])
         record({"epoch": epoch, "train_loss": sum(losses) / len(losses), "lr": scheduler.get_last_lr()[0],
-                **validation})
+                "eval_loss": validation_loss})
         save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "last.pt")
-        if validation["eval_loss"] < best_loss:
-            best_loss, best_epoch = validation["eval_loss"], epoch
+        if validation_loss < best_loss:
+            best_loss, best_epoch = validation_loss, epoch
             save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "best.pt")
         if step >= total_steps:
             break

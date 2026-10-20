@@ -16,6 +16,7 @@ import torch
 from ..data.labels import plan
 from ..train.config import TrainConfig
 from ..train.features import FeatureSet
+from .answers import answer_trace
 from .metrics import uhead_probabilities
 
 
@@ -73,7 +74,8 @@ def export_predictions(model_name: str, checkpoint: str | Path, features: str | 
         probability = uhead_probabilities(model(features_tensor).cpu())[0]
         record = fs.records[index]
         rows.append({"record_id": record.id, "probabilities": probability.tolist(), "target_pair": target,
-                     "visible_pair": visible, "fps": record.fps})
+                     "visible_pair": visible, "fps": record.fps,
+                     "answer_correct": answer_trace(fs, index).is_correct.tolist()})
     payload = {"metadata": metadata, "predictions": rows}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")

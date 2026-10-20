@@ -46,7 +46,7 @@ PYTHONPATH=src python -m uhead.train --tags sigmoid --sigmoid-slope 0.65 --outpu
 ## Validation и test
 
 - Признаки `features.eval` делятся **по видео** (seed из конфига) на две равные части: validation и test. Вопросы одного видео всегда в одной части; списки видео — в `split.json`. `data.eval_samples` здесь не используется.
-- После каждой эпохи в `metrics.jsonl` пишутся средний по батчам train loss и метрики validation; сохраняется `last.pt`, а при наименьшем validation loss — `best.pt`.
+- После каждой эпохи в `metrics.jsonl` пишутся только средний по батчам train loss и validation loss (`eval_loss`); сохраняется `last.pt`, а при наименьшем validation loss — `best.pt`. Метрики считаются один раз, в конце обучения, для `best.pt`.
 - После обучения `best.pt` оценивается на validation при каждом пороге `eval.thresholds`. Итог — `results.json` (лучшая эпоха, классификационные метрики, онлайн-метрики по каждому порогу) и вероятности `predictions_validation.json` (формат `online_vllm.eval.export`).
 - Test обучение не трогает. По `results.json` выберите порог и оцените test отдельно:
 
@@ -55,6 +55,22 @@ PYTHONPATH=src python -m uhead.evaluate --run outputs/group1_uhead/hard --thresh
 ```
 
 Результат — `test_best_tau0.7.json` (loss, классификационные и онлайн-метрики при этом пороге) и вероятности `predictions_test_best_tau0.7.json`.
+
+## Качество ответа
+
+Ответ модели на паре p — буква с наибольшей вероятностью среди вариантов в пробе «ответь сейчас» замороженной Qwen (`probe_logprob`, `online_vllm/eval/answers.py`). К онлайн-метрикам каждого порога (validation в `results.json`, test в `uhead.evaluate`) добавляются:
+
+- `answer_accuracy` — доля всех вопросов, где ответ на паре срабатывания верный; пропуск считается неверным ответом;
+- `answer_accuracy_answered` — то же среди вопросов, где модель ответила;
+- `timely_correct_pm2` — ответ не дальше ±2 пар от целевой и верный;
+- `answer_accuracy_premature` / `_early` / `_on_target` / `_late` — точность ответов с этим исходом (`null`, если таких нет).
+
+Опорные уровни и кривые от головы не зависят и считаются один раз на набор признаков: случайное угадывание, точность перед появлением ответа, на целевой паре и в конце видео, а по сдвигу относительно целевой пары — точность, P(правильный ответ) и P(текущий ответ):
+
+```bash
+PYTHONPATH=src python -m online_vllm.eval.answers --features <каталог признаков> \
+    --output results/answers/val.json --plot results/answers/val.png [--split checkpoints/.../split.json --part test]
+```
 
 Веса и результаты можно разнести по разным каталогам: `--output` получает веса, конфиги и `split.json`, а `--results` (у `uhead.train` и `uhead.evaluate`) — `metrics.jsonl`, `results.json` и предсказания. Без `--results` всё пишется в `--output`. Так делает `experiment_launcher/common.sh`: веса в `checkpoints/<arch>/<id>/` (не в git), результаты в `results/<arch>/<id>/` в корне репозитория.
 

@@ -93,10 +93,14 @@ def _classification(probabilities, target_pairs, valid_mask, threshold):
             "count": int(len(y))}
 
 
-def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps):
+def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps,
+                       correct=None):
     kinds = {"premature": 0, "early": 0, "on_target": 0, "late": 0, "missed": 0}
+    right = dict.fromkeys(kinds, 0)  # верные ответы Qwen на паре срабатывания, по исходам
+    timely_right = 0
     errors, seconds = [], []
-    for p, target, visible, mask, one_fps in zip(probabilities, target_pairs, visible_pairs, valid_mask, fps):
+    for v, (p, target, visible, mask, one_fps) in enumerate(zip(probabilities, target_pairs, visible_pairs,
+                                                                 valid_mask, fps)):
         n = int(mask.sum())
         if not 0 <= visible <= target < n:
             raise ValueError("Нужны 0 <= t_visible <= t* < длины видео")
@@ -109,7 +113,11 @@ def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, t
             if one_fps <= 0:
                 raise ValueError("fps должен быть положительным")
             seconds.append(error * frames_per_pair / one_fps)
-        kinds["premature" if fired < visible else "early" if fired < target else "on_target" if fired == target else "late"] += 1
+        kind = "premature" if fired < visible else "early" if fired < target else "on_target" if fired == target else "late"
+        kinds[kind] += 1
+        if correct is not None and correct[v][fired]:
+            right[kind] += 1
+            timely_right += abs(error) <= 2
     videos = len(target_pairs)
     result = {f"{name}_rate": value / videos for name, value in kinds.items()}
     result["miss_rate"] = result["missed_rate"]  # старый JSON sweep до унификации
@@ -126,14 +134,25 @@ def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, t
     for name, fn in (("mean", np.mean), ("std", np.std), ("mae", lambda x: np.mean(abs(x))),
                      ("rmse", lambda x: math.sqrt(np.mean(x * x))), ("median", np.median)):
         result[f"timing_{name}_seconds"] = None if not len(second_errors) else float(fn(second_errors))
+    if correct is not None:
+        # Ответ Qwen на паре срабатывания головы (eval/answers.py); пропуск считается неверным ответом.
+        answered = videos - kinds["missed"]
+        result["answer_accuracy"] = sum(right.values()) / videos
+        result["answer_accuracy_answered"] = sum(right.values()) / answered if answered else None
+        result["timely_correct_pm2"] = timely_right / videos
+        for kind in ("premature", "early", "on_target", "late"):
+            result[f"answer_accuracy_{kind}"] = right[kind] / kinds[kind] if kinds[kind] else None
     return result
 
 
 def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: Sequence[int], visible_pairs: Sequence[int],
                        taus: Sequence[float], temporal_patch: int, frame_stride: int, valid_mask=None,
                        fps: Sequence[float | None] | None = None, classification_threshold: float = 0.5,
-                       model: str | None = None, tags: str | None = None) -> dict:
-    """Возвращает JSON-совместимые метрики; все timing-значения в исходных кадрах и, при FPS, секундах."""
+                       model: str | None = None, tags: str | None = None, correct=None) -> dict:
+    """Возвращает JSON-совместимые метрики; все timing-значения в исходных кадрах и, при FPS, секундах.
+
+    correct — по видео булев массив «ответ Qwen на этой паре верный» (eval/answers.py); с ним к метрикам каждого
+    порога добавляются answer_accuracy, answer_accuracy_answered, timely_correct_pm2 и точность по исходам."""
     p = np.asarray(probabilities, dtype=float)
     if p.ndim != 2 or len(p) != len(target_pairs) or len(p) != len(visible_pairs):
         raise ValueError("probabilities должны иметь форму [B,P], согласованную с metadata")
@@ -148,6 +167,10 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
         fps = [None] * len(p)
     if len(fps) != len(p):
         raise ValueError("fps должен содержать одно значение на видео")
+    if correct is not None:
+        correct = [np.asarray(c, dtype=bool) for c in correct]
+        if len(correct) != len(p) or any(len(c) < n for c, n in zip(correct, mask.sum(1))):
+            raise ValueError("correct должен содержать по видео массив не короче его valid-части")
     output = {"model": model, "tags": tags, "num_videos": len(p),
               "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {}}
     frames_per_pair = temporal_patch * frame_stride
@@ -155,5 +178,5 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
         if not 0 < tau < 1:
             raise ValueError("taus должны лежать в (0,1)")
         output["thresholds"][str(tau)] = _threshold_metrics(p, target_pairs, visible_pairs, mask, tau,
-                                                              frames_per_pair, fps)
+                                                              frames_per_pair, fps, correct)
     return output

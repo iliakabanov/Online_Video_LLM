@@ -10,6 +10,6 @@ projection_hidden_dims: {}
 model_dim: 512
 nhead: 8
 num_layers: 2
-dropout: 0.1
+dropout: 0.2
 normalization_eps: 1.0e-6
 temporal_detector: transformer

@@ -76,3 +76,35 @@ def test_non_right_padded_mask_is_rejected():
     with pytest.raises(ValueError, match="right-padding"):
         evaluate_readiness(np.array([[.1, .2, .9]]), [1], [1], [.5], 1, 1,
                            valid_mask=np.array([[True, False, True]]))
+
+
+def test_answer_metrics_at_the_firing_pair():
+    # Вопрос 0 срабатывает на целевой паре 2 (ответ верный), 1 — преждевременно на паре 0 (неверный),
+    # 2 — поздно на паре 4 (верный, но вне ±2), 3 — ни разу (пропуск считается неверным ответом).
+    probabilities = np.array([[.1, .1, .9, .9, .9], [.9, .1, .1, .1, .1], [.1, .1, .1, .1, .9], [.1] * 5])
+    correct = [[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [0, 0, 0, 0, 1], [1] * 5]
+    metrics = evaluate_readiness(probabilities, [2, 2, 1, 2], [2, 2, 1, 2], [.5], 1, 1,
+                                 correct=correct)["thresholds"]["0.5"]
+    assert metrics["answer_accuracy"] == 2 / 4
+    assert metrics["answer_accuracy_answered"] == 2 / 3
+    assert metrics["timely_correct_pm2"] == 1 / 4
+    assert metrics["answer_accuracy_on_target"] == 1 and metrics["answer_accuracy_premature"] == 0
+    assert metrics["answer_accuracy_late"] == 1 and metrics["answer_accuracy_early"] is None
+    assert "answer_accuracy" not in evaluate_readiness(probabilities, [2, 2, 1, 2], [2, 2, 1, 2], [.5], 1, 1)[
+        "thresholds"]["0.5"]
+
+
+def test_choice_probabilities_and_answer_curves():
+    from online_vllm.eval.answers import AnswerTrace, answer_curves, choice_probabilities
+    raw = np.array([[np.log(.2), np.log(.6), np.nan, np.nan, -1.0], [np.log(.3), np.log(.1), np.nan, np.nan, -1.0]])
+    probs = choice_probabilities(raw, 2)
+    np.testing.assert_allclose(probs, [[.25, .75], [.75, .25]])
+    # Правильный вариант 1: модель права на паре 0 и ошибается на паре 1.
+    trace = AnswerTrace(probs, correct=1, target_pair=1, visible_pair=1)
+    result = answer_curves([trace], offsets=range(-1, 2))
+    assert result["levels"]["chance"] == .5
+    assert result["levels"]["before_visible"]["accuracy"] == 1.0
+    assert result["levels"]["at_target"] == pytest.approx({"count": 1, "accuracy": 0.0, "p_correct": .25,
+                                                           "p_answer": .75, "chance": .5})
+    assert [row["count"] for row in result["curve"]] == [1, 1, 0]
+    assert result["curve"][0]["p_correct"] == pytest.approx(.75)
