@@ -27,6 +27,10 @@ def test_adapters_padding_and_shared_hard_targets():
     state = torch.tensor([[[0., 0., 1.], [0., 0., 2.]]])
     binary = torch.tensor([[1., 2.]])
     assert statehead_probabilities(state, ["silent", "prepare", "speak"]).shape == (1, 2)
+    # Плоские logits позиций решений из train/head.py и train/loop.py.
+    flat = statehead_probabilities(state[0], ["silent", "prepare", "speak"])
+    assert flat.shape == (2,)
+    np.testing.assert_allclose(flat, statehead_probabilities(state, ["silent", "prepare", "speak"])[0])
     np.testing.assert_allclose(uhead_probabilities(binary), torch.sigmoid(binary).numpy())
     result = evaluate_readiness(np.array([[.1, .9, .0]]), [1], [1], [.5], 1, 1,
                                 valid_mask=np.array([[True, True, False]]))

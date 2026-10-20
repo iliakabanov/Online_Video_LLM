@@ -39,6 +39,9 @@ class FeaturesConfig:
 @dataclass
 class EvalConfig:
     taus: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7, 0.9])  # thresholds on P(speak) online
+    # uhead.train: after training, best.pt is evaluated on the validation half of eval at every threshold;
+    # the test half is evaluated separately at a chosen threshold (python -m uhead.evaluate).
+    thresholds: list[float] = field(default_factory=lambda: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99])
 
 
 @dataclass
@@ -111,6 +114,8 @@ class TrainConfig:
             raise ValueError("eval_samples must be null or positive")
         if any(not 0 < t < 1 for t in self.eval.taus):
             raise ValueError("eval taus must be in (0, 1)")
+        if not self.eval.thresholds or any(not 0 < t < 1 for t in self.eval.thresholds):
+            raise ValueError("eval thresholds must be nonempty and in (0, 1)")
         f = self.features
         if not f.lm_layers or min(f.lm_layers) < 1 or not f.vis_layers or min(f.vis_layers) < 0:
             raise ValueError("lm_layers must be nonempty and >= 1, vis_layers nonempty and >= 0")

@@ -43,7 +43,11 @@ class ReadinessFusion(nn.Module):
             if mean.shape != (FEATURE_DIMS[name],) or std.shape != mean.shape:
                 raise ValueError(f"Некорректная форма статистики для {name}")
             getattr(self, f"{name}_mean").copy_(mean.float())
-            getattr(self, f"{name}_std").copy_(std.float())
+            # Колонка, постоянная на train, только центрируется: деление на eps превратило бы малое отличие
+            # на val в значения порядка 1/eps.
+            std = std.float()
+            getattr(self, f"{name}_std").copy_(torch.where(std > self.config.normalization_eps, std,
+                                                           torch.ones_like(std)))
 
     def forward(self, features: dict[str, torch.Tensor]) -> torch.Tensor:
         if set(features) != set(self.config.groups):

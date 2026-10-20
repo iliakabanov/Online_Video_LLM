@@ -9,12 +9,15 @@ import torch
 
 
 def statehead_probabilities(logits: torch.Tensor | np.ndarray, classes: Sequence[str]) -> np.ndarray:
-    """Берёт P(SPEAK) из logits StateHead [B, P, C] без предположения о порядке классов."""
+    """Берёт P(SPEAK) из logits StateHead [..., C] без предположения о порядке классов.
+
+    Вход [B, P, C] даёт [B, P]; плоские logits позиций решений [N, C] (train/head.py, train/loop.py) дают [N].
+    """
     if "speak" not in classes:
         raise ValueError("classes должен содержать speak")
     x = torch.as_tensor(logits)
-    if x.ndim != 3 or x.shape[-1] != len(classes):
-        raise ValueError("StateHead logits должны иметь форму [B, P, C]")
+    if x.ndim < 2 or x.shape[-1] != len(classes):
+        raise ValueError("StateHead logits должны иметь форму [..., C]")
     return x.float().softmax(-1)[..., classes.index("speak")].cpu().numpy()
 
 

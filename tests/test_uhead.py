@@ -6,8 +6,8 @@ from uhead.config import FEATURE_DIMS, UHeadConfig
 from uhead.model import UHead
 from online_vllm.models.heads import StateHead
 from uhead.train import load_checkpoint, save_checkpoint
-from uhead.train import _pad_probabilities, binary_loss
-from uhead.data import confidence_features, feature_rows
+from uhead.train import _pad_probabilities, binary_loss, split_by_video
+from uhead.data import LabelledItem, confidence_features, feature_rows
 
 
 def small_config():
@@ -42,6 +42,28 @@ def test_forward_backward_padding_and_zero_variance_normalization():
     loss.backward()
     assert logits.shape == (2, 4)
     assert torch.isfinite(logits).all() and torch.isfinite(loss)
+
+
+def test_eval_split_keeps_every_video_in_one_half():
+    from types import SimpleNamespace
+    videos = [f"v{i}" for i in range(7) for _ in range(i % 3 + 1)]  # 7 видео по 1-3 вопроса
+    fs = SimpleNamespace(records=[SimpleNamespace(video=v) for v in videos])
+    items = [LabelledItem(i, np.zeros(1, dtype=np.float32), 0, 0) for i in range(len(videos))]
+    validation, test, info = split_by_video(fs, items, seed=0)
+    assert len(info["validation_videos"]) == 3 and len(info["test_videos"]) == 4
+    assert not set(info["validation_videos"]) & set(info["test_videos"])
+    assert sorted(item.index for item in validation + test) == list(range(len(videos)))
+    assert {videos[item.index] for item in validation} == set(info["validation_videos"])
+    assert split_by_video(fs, items, seed=0)[2] == info  # разбиение воспроизводимо
+
+
+def test_constant_train_columns_are_only_centered():
+    model = UHead(small_config())
+    stats = {name: (torch.zeros(dim), torch.full((dim,), 2.0)) for name, dim in FEATURE_DIMS.items()}
+    stats["lm"][1][:3] = 0.0
+    model.set_normalization(stats)
+    std = model.fusion_block.lm_std
+    assert std[:3].tolist() == [1.0, 1.0, 1.0] and bool((std[3:] == 2.0).all())
 
 
 def test_causal_invariance_and_prefix():

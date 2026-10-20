@@ -1,4 +1,10 @@
-"""Обучение бинарного causal UHead на кешированных признаках без загрузки Qwen."""
+"""Обучение бинарного causal UHead на кешированных признаках без загрузки Qwen.
+
+Eval-признаки делятся по видео на две равные части: validation и test (split.json). После каждой эпохи считаются
+средний train loss и метрики validation; сохраняются last.pt и best.pt (наименьший validation loss). После обучения
+best.pt оценивается на validation при каждом пороге eval.thresholds (results.json). Test оценивается отдельно, с
+выбранным порогом: python -m uhead.evaluate.
+"""
 import argparse
 import json
 import logging
@@ -65,14 +71,14 @@ def _preserve_rng(callable_):
 
 
 @torch.no_grad()
-def evaluate(model, dataset, config, device, batch_size=64):
-    """Единая hard-GT оценка; soft training BCE сохраняется отдельным ключом."""
+def predict(model, dataset, config, device, batch_size=64) -> tuple[float, list[dict]]:
+    """Loss по меткам режима обучения и непаддированные вероятности каждой записи dataset."""
     from .data import collate
     was_training = model.training
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate)
     total = count = 0
-    probabilities, masks, target_pairs, visible_pairs, fps = [], [], [], [], []
+    rows = []
     for features, targets, padding, items in loader:
         features = {name: value.to(device) for name, value in features.items()}
         targets, padding = targets.to(device), padding.to(device)
@@ -85,29 +91,69 @@ def evaluate(model, dataset, config, device, batch_size=64):
         probability = uhead_probabilities(logits)
         valid_cpu = valid.cpu().numpy()
         for b, item in enumerate(items):
-            n = int(valid_cpu[b].sum())
-            probabilities.append(probability[b, :n])
-            target_pairs.append(item.target_pair)
-            visible_pairs.append(item.visible_pair)
-            fps.append(dataset.fs.records[item.index].fps)
+            record = dataset.fs.records[item.index]
+            rows.append({"record_id": record.id, "probabilities": probability[b, :int(valid_cpu[b].sum())],
+                         "target_pair": item.target_pair, "visible_pair": item.visible_pair, "fps": record.fps})
     model.train(was_training)
-    probabilities, masks = _pad_probabilities(probabilities)
-    result = evaluate_readiness(probabilities, target_pairs, visible_pairs, config.eval.taus,
-                                dataset.fs.meta["temporal_patch"], dataset.fs.meta["frame_stride"], masks,
-                                fps, model="uhead", tags=getattr(model, "tag_settings", {}).get("tags"))
-    return {"eval_loss": total / count, "eval_target_bce": total / count, **flatten_readiness_metrics(result)}
+    return total / count, rows
+
+
+def _readiness(rows, taus, meta, classification_threshold=0.5, model=None, tags=None) -> dict:
+    probabilities, masks = _pad_probabilities([row["probabilities"] for row in rows])
+    return evaluate_readiness(probabilities, [row["target_pair"] for row in rows],
+                              [row["visible_pair"] for row in rows], taus, meta["temporal_patch"],
+                              meta["frame_stride"], masks, [row["fps"] for row in rows], classification_threshold,
+                              model=model, tags=tags)
+
+
+def evaluate(model, dataset, config, device, batch_size=64):
+    """Единая hard-GT оценка; soft training BCE сохраняется отдельным ключом."""
+    loss, rows = predict(model, dataset, config, device, batch_size)
+    result = _readiness(rows, config.eval.taus, dataset.fs.meta, model="uhead",
+                        tags=getattr(model, "tag_settings", {}).get("tags"))
+    return {"eval_loss": loss, "eval_target_bce": loss, **flatten_readiness_metrics(result)}
+
+
+def split_by_video(fs, items, seed: int):
+    """Делит записи eval на validation и test по видео, чтобы вопросы одного видео не попали в обе части."""
+    by_video = {}
+    for item in items:
+        by_video.setdefault(fs.records[item.index].video, []).append(item)
+    videos = list(by_video)
+    if len(videos) < 2:
+        raise ValueError("Для деления на validation и test нужно хотя бы два видео в eval")
+    random.Random(seed).shuffle(videos)
+    half = len(videos) // 2
+    validation_videos, test_videos = sorted(videos[:half]), sorted(videos[half:])
+    validation = [item for video in validation_videos for item in by_video[video]]
+    test = [item for video in test_videos for item in by_video[video]]
+    return validation, test, {"seed": seed, "validation_videos": validation_videos, "test_videos": test_videos,
+                              "validation_questions": len(validation), "test_questions": len(test)}
+
+
+def head_config(model) -> UHeadConfig:
+    """UHeadConfig модели: у бинарного StateHead он хранится в readiness_config, у UHead — в config."""
+    return model.readiness_config if isinstance(model, StateHead) else model.config
+
+
+def _write_predictions(path: Path, rows, meta, model_name, tags, split):
+    """Формат online_vllm.eval.export: его принимает python -m online_vllm.eval.thresholds."""
+    payload = {"metadata": {"model": model_name, "tags": tags, "split": split,
+                            "temporal_patch": meta["temporal_patch"], "frame_stride": meta["frame_stride"]},
+               "predictions": [{**row, "probabilities": row["probabilities"].tolist()} for row in rows]}
+    path.write_text(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
 
 
 def save_checkpoint(model, uhead_config, train_config, tag_settings: dict | Path, path: Path | None = None,
-                    metadata: dict | None = None):
-    """Сохраняет веса, train-only normalizer buffers и выбранный режим формирования GT."""
+                    metadata: dict | None = None, filename: str = "uhead.pt"):
+    """Сохраняет веса (path/filename), train-only normalizer buffers и выбранный режим формирования GT."""
     # Старый API передавал path четвёртым аргументом; поддерживаем его, не теряя metadata нового режима.
     if path is None:
         path, tag_settings = Path(tag_settings), {"tags": "hard", "step_window": 5, "sigmoid_slope": 0.65}
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     torch.save({"model_state": model.state_dict(), "tag_settings": tag_settings,
-                "temporal_detector": uhead_config.temporal_detector}, path / "uhead.pt")
+                "temporal_detector": uhead_config.temporal_detector}, path / filename)
     uhead_config.save(path / "uhead.yaml")
     train_config.save(path / "train.yaml")
     (path / "tags.json").write_text(json.dumps(tag_settings, indent=2) + "\n", encoding="utf-8")
@@ -118,10 +164,17 @@ def save_checkpoint(model, uhead_config, train_config, tag_settings: dict | Path
     return path
 
 
-def load_checkpoint(path: str | Path, device="cpu"):
-    """Восстанавливает бинарную модель и metadata режима; статистики лежат в state_dict."""
+def load_checkpoint(path: str | Path, device="cpu", filename: str | None = None):
+    """Восстанавливает бинарную модель и metadata режима; статистики лежат в state_dict.
+
+    path — каталог запуска или файл весов внутри него. В каталоге без filename берётся best.pt, если он есть,
+    иначе uhead.pt (чекпоинты до разделения на best/last)."""
     path = Path(path)
-    state = torch.load(path / "uhead.pt", map_location=device, weights_only=True)
+    if path.is_file():
+        path, filename = path.parent, path.name
+    elif filename is None:
+        filename = "best.pt" if (path / "best.pt").exists() else "uhead.pt"
+    state = torch.load(path / filename, map_location=device, weights_only=True)
     config = UHeadConfig.load(path / "uhead.yaml")
     if state.get("classes") is not None:
         raise ValueError("Трёхклассовый UHead checkpoint несовместим с бинарным readiness detector")
@@ -137,7 +190,8 @@ def load_checkpoint(path: str | Path, device="cpu"):
 def train(uhead_config, train_config, data_root: Path, output_dir: Path, device, tags: TagMode = "hard",
           step_window: int = 5, sigmoid_slope: float = 0.65, flat_output: bool = False,
           overwrite: bool = False) -> Path:
-    """Обучает один из трёх бинарных режимов GT на полном наборе доступных пар кадров."""
+    """Обучает один из трёх бинарных режимов GT; возвращает каталог запуска с best.pt, last.pt, split.json и
+    results.json (метрики best.pt на validation при каждом пороге)."""
     # Сохраняем работоспособность прежнего scripts/train_uhead.py, который передавал список классов третьим аргументом.
     if isinstance(data_root, list):
         _, data_root, output_dir, device, tags = data_root, output_dir, device, tags, "hard"
@@ -150,6 +204,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
         raise NotImplementedError("UHead обучается на кешированных признаках; loss.lm_weight должен быть 0")
     seed_everything(train_config.seed)
     tag_settings = {"tags": tags, "step_window": step_window, "sigmoid_slope": sigmoid_slope}
+    model_name = "statehead" if uhead_config.temporal_detector == "mlp" else "uhead"
     train_fs = FeatureSet(Path(data_root) / train_config.features.train)
     eval_fs = FeatureSet(Path(data_root) / train_config.features.eval)
     for fs in (train_fs, eval_fs):
@@ -159,16 +214,14 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
             raise ValueError(f"Train и eval features расходятся по {key}")
     train_items, train_dropped = labelled(train_fs, train_config, tags, step_window, sigmoid_slope)
     eval_items, eval_dropped = labelled(eval_fs, train_config, tags, step_window, sigmoid_slope)
-    logger.info("train: %d записей (%d исключено), eval: %d (%d исключено)", len(train_items), train_dropped,
-                len(eval_items), eval_dropped)
+    validation_items, test_items, split = split_by_video(eval_fs, eval_items, train_config.seed)
+    logger.info("train: %d записей (%d исключено); eval: %d (%d исключено) -> validation %d вопросов / %d видео, "
+                "test %d / %d", len(train_items), train_dropped, len(eval_items), eval_dropped,
+                len(validation_items), len(split["validation_videos"]), len(test_items), len(split["test_videos"]))
     train_data = ReadinessDataset(train_fs, train_items, uhead_config.groups)
-    eval_all = ReadinessDataset(eval_fs, eval_items, uhead_config.groups)
-    if train_config.data.eval_samples is not None and train_config.data.eval_samples < len(eval_items):
-        sampled = random.Random(train_config.seed).sample(eval_items, train_config.data.eval_samples)
-        eval_data = ReadinessDataset(eval_fs, sampled, uhead_config.groups)
-    else:
-        eval_data = eval_all
+    validation_data = ReadinessDataset(eval_fs, validation_items, uhead_config.groups)
     model = (StateHead(uhead_config) if uhead_config.temporal_detector == "mlp" else UHead(uhead_config)).to(device)
+    model.tag_settings = tag_settings
     model.set_normalization(fit_normalization(train_data))
     trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("Обучаемых параметров: %d", trainable_parameters)
@@ -176,6 +229,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(f"{output_dir} уже содержит запуск; укажите --overwrite для явной перезаписи")
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "split.json").write_text(json.dumps(split, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     metadata = {"architecture": uhead_config.temporal_detector, "feature_groups": uhead_config.groups,
                 "training_gt": tags, "seed": train_config.seed, "trainable_parameters": trainable_parameters,
                 "validation_split": str(train_config.features.eval),
@@ -188,15 +242,16 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     total_steps = o.epochs * batches if o.max_steps is None else min(o.epochs * batches, o.max_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, o.warmup_steps, total_steps))
     log = open(output_dir / "metrics.jsonl", "w", encoding="utf-8")
-    step, losses = 0, []
+    step, best_loss, best_epoch = 0, math.inf, None
 
     def record(metrics):
         log.write(json.dumps({"step": step, **tag_settings, **metrics}) + "\n")
         log.flush()
         logger.info("step %d: %s", step, metrics)
 
-    model.train()
-    for epoch in range(o.epochs):
+    for epoch in range(1, o.epochs + 1):
+        model.train()
+        losses = []
         for batch_index, (features, targets, padding, _) in enumerate(loader):
             features = {name: value.to(device) for name, value in features.items()}
             targets, padding = targets.to(device), padding.to(device)
@@ -209,19 +264,38 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
                 continue
             torch.nn.utils.clip_grad_norm_(model.parameters(), o.grad_clip)
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); step += 1
-            if step % o.log_every == 0:
-                record({"epoch": epoch, "loss": sum(losses) / len(losses), "lr": scheduler.get_last_lr()[0]}); losses = []
-            if step % o.eval_every == 0:
-                record(_preserve_rng(lambda: evaluate(model, eval_data, train_config, device, o.batch_size)))
-            if step % o.save_every == 0:
-                save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir / f"step_{step}", metadata)
             if step >= total_steps:
                 break
+        validation = _preserve_rng(lambda: evaluate(model, validation_data, train_config, device, o.batch_size))
+        record({"epoch": epoch, "train_loss": sum(losses) / len(losses), "lr": scheduler.get_last_lr()[0],
+                **validation})
+        save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "last.pt")
+        if validation["eval_loss"] < best_loss:
+            best_loss, best_epoch = validation["eval_loss"], epoch
+            save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "best.pt")
         if step >= total_steps:
             break
-    record({"final": True, **_preserve_rng(lambda: evaluate(model, eval_all, train_config, device, o.batch_size))})
+
+    # best.pt на validation при каждом пороге; test оценивается отдельно (python -m uhead.evaluate).
+    model = load_checkpoint(output_dir, device, "best.pt")
+    validation_loss, validation_rows = predict(model, validation_data, train_config, device, o.batch_size)
+    validation = _readiness(validation_rows, train_config.eval.thresholds, eval_fs.meta, model=model_name, tags=tags)
+    results = {
+        "model": model_name, "feature_groups": uhead_config.groups, **tag_settings,
+        "best_epoch": best_epoch, "best_validation_loss": best_loss,
+        "validation": {"questions": len(validation_rows), "videos": len(split["validation_videos"]),
+                       "loss": validation_loss, "classification": validation["classification"],
+                       "thresholds": validation["thresholds"]},
+    }
+    (output_dir / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+                                             encoding="utf-8")
+    _write_predictions(output_dir / "predictions_validation.json", validation_rows, eval_fs.meta, model_name, tags,
+                       "validation")
+    record({"final": True, "best_epoch": best_epoch, "best_validation_loss": best_loss,
+            "validation_auroc": validation["classification"]["auroc"],
+            "validation_auprc": validation["classification"]["auprc"]})
     log.close()
-    return save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir / "final", metadata)
+    return output_dir
 
 
 def build_parser():
@@ -249,7 +323,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     result = train(UHeadConfig.load(args.uhead), TrainConfig.load(args.train), Path(args.data_root), Path(args.output),
                    args.device, args.tags, args.step_window, args.sigmoid_slope, args.flat_output, args.overwrite)
-    print("Финальный checkpoint:", result)
+    print("Каталог запуска:", result)
 
 
 if __name__ == "__main__":

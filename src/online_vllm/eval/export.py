@@ -14,7 +14,6 @@ from pathlib import Path
 import torch
 
 from ..data.labels import plan
-from ..models.heads import StateHead
 from ..train.config import TrainConfig
 from ..train.features import FeatureSet
 from .metrics import uhead_probabilities
@@ -40,56 +39,41 @@ def export_predictions(model_name: str, checkpoint: str | Path, features: str | 
                        output: str | Path, device: str = "cpu") -> dict:
     """Записывает непаддированные вероятности каждой записи в переносимый JSON."""
     checkpoint, output = Path(checkpoint), Path(output)
-    config = TrainConfig.load(checkpoint / "train.yaml")
+    # checkpoint — каталог запуска (берётся best.pt, либо uhead.pt у старых запусков) или файл весов в нём.
+    run_dir = checkpoint.parent if checkpoint.is_file() else checkpoint
+    config = TrainConfig.load(run_dir / "train.yaml")
     fs = FeatureSet(features)
     fs.check(config.video)
     items = _items(fs, config)
     metadata = {"model": model_name, "seed": config.seed, "checkpoint_path": str(checkpoint), "split": split,
                 "temporal_patch": fs.meta["temporal_patch"], "frame_stride": fs.meta["frame_stride"]}
-    experiment_path = checkpoint / "experiment.json"
+    experiment_path = run_dir / "experiment.json"
     if experiment_path.exists():
         experiment = json.loads(experiment_path.read_text(encoding="utf-8"))
         metadata.update({key: experiment[key] for key in ("architecture", "feature_groups", "training_gt",
                                                            "trainable_parameters") if key in experiment})
-    rows = []
-    if model_name == "statehead":
-        # Новый StateHead хранится в том же компактном detector checkpoint, что и UHead.
-        from uhead.config import UHeadConfig
-        if not (checkpoint / "uhead.pt").exists() or not (checkpoint / "uhead.yaml").exists():
-            raise ValueError("Трёхклассовый StateHead checkpoint несовместим с бинарным MLP readiness detector")
-        state = torch.load(checkpoint / "uhead.pt", map_location="cpu", weights_only=True)
-        uhead_config = UHeadConfig.load(checkpoint / "uhead.yaml")
-        if uhead_config.temporal_detector != "mlp":
-            raise ValueError("--model statehead требует checkpoint с temporal_detector: mlp")
-        head = StateHead(uhead_config).to(device)
-        head.load_state_dict(state["model_state"], strict=True); head.eval()
-        metadata["tags"] = state["tag_settings"].get("tags")
-        metadata["feature_groups"] = list(uhead_config.groups)
-        from uhead.data import feature_rows
-        for index, target, visible in items:
-            n = fs.patches[index]
-            values = feature_rows(fs, index, n, uhead_config.groups)
-            features_tensor = {name: torch.from_numpy(value)[None].to(device) for name, value in values.items()}
-            probability = uhead_probabilities(head(features_tensor).cpu())[0]
-            record = fs.records[index]
-            rows.append({"record_id": record.id, "probabilities": probability.tolist(), "target_pair": target,
-                         "visible_pair": visible, "fps": record.fps})
-    elif model_name == "uhead":
-        from uhead.data import feature_rows
-        from uhead.train import load_checkpoint
-        model = load_checkpoint(checkpoint, device).eval()
-        metadata["tags"] = model.tag_settings.get("tags")
-        metadata["feature_groups"] = list(model.config.groups)
-        for index, target, visible in items:
-            n = fs.patches[index]
-            values = feature_rows(fs, index, n, model.config.groups)
-            features_tensor = {name: torch.from_numpy(value)[None].to(device) for name, value in values.items()}
-            probability = uhead_probabilities(model(features_tensor).cpu())[0]
-            record = fs.records[index]
-            rows.append({"record_id": record.id, "probabilities": probability.tolist(), "target_pair": target,
-                         "visible_pair": visible, "fps": record.fps})
-    else:
+    if model_name not in ("statehead", "uhead"):
         raise ValueError("model должен быть statehead или uhead")
+    if not (run_dir / "uhead.yaml").exists():
+        raise ValueError("Трёхклассовый StateHead checkpoint несовместим с бинарным readiness detector")
+    # Бинарный StateHead (mlp) и UHead (transformer) хранятся в одном формате detector checkpoint.
+    from uhead.data import feature_rows
+    from uhead.train import head_config as config_of, load_checkpoint
+    model = load_checkpoint(checkpoint, device).eval()
+    head_config = config_of(model)
+    if (head_config.temporal_detector == "mlp") != (model_name == "statehead"):
+        raise ValueError(f"--model {model_name} не соответствует checkpoint с temporal_detector: "
+                         f"{head_config.temporal_detector}")
+    metadata["tags"] = model.tag_settings.get("tags")
+    metadata["feature_groups"] = list(head_config.groups)
+    rows = []
+    for index, target, visible in items:
+        values = feature_rows(fs, index, fs.patches[index], head_config.groups)
+        features_tensor = {name: torch.from_numpy(value)[None].to(device) for name, value in values.items()}
+        probability = uhead_probabilities(model(features_tensor).cpu())[0]
+        record = fs.records[index]
+        rows.append({"record_id": record.id, "probabilities": probability.tolist(), "target_pair": target,
+                     "visible_pair": visible, "fps": record.fps})
     payload = {"metadata": metadata, "predictions": rows}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")

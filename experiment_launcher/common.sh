@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Общий запуск: обучение cached-feature detector, один validation inference и sweep.
+# Общий запуск: обучение cached-feature detector и метрики на validation-половине VAL_FEATURES при каждом пороге
+# (eval.thresholds в configs/train/group1.yaml). Test-половина оценивается отдельно, с выбранным порогом:
+#   PYTHONPATH=src python -m uhead.evaluate --run experiment_launcher/checkpoints/<arch>/<id> --threshold <tau> \
+#     --data-root "$DATA_ROOT"
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,7 +11,6 @@ TRAIN_FEATURES="${TRAIN_FEATURES:-/PATH/TO/TRAIN_FEATURES}"
 VAL_FEATURES="${VAL_FEATURES:-/PATH/TO/VAL_FEATURES}"
 DEVICE="${DEVICE:-cuda}"
 OVERWRITE="${OVERWRITE:-0}"
-THRESHOLDS=(0.5 0.6 0.7 0.8 0.85 0.9 0.95 0.99)
 
 run_experiment() {
   local experiment_id="$1" architecture="$2"; shift 2
@@ -33,7 +35,7 @@ run_experiment() {
   train_config="$(mktemp)"; uhead_config="$(mktemp)"
   trap 'rm -f "$train_config" "$uhead_config"' RETURN
   ROOT="$ROOT" TRAIN_FEATURES="$TRAIN_FEATURES" VAL_FEATURES="$VAL_FEATURES" \
-    GROUPS="${groups[*]}" DETECTOR="$detector" TRAIN_CONFIG="$train_config" UHEAD_CONFIG="$uhead_config" python - <<'PY'
+    FEATURE_GROUPS="${groups[*]}" DETECTOR="$detector" TRAIN_CONFIG="$train_config" UHEAD_CONFIG="$uhead_config" python - <<'PY'
 import os
 from pathlib import Path
 import yaml
@@ -44,30 +46,26 @@ train["features"]["train"] = os.environ["TRAIN_FEATURES"]
 train["features"]["eval"] = os.environ["VAL_FEATURES"]
 train["seed"] = 0
 uhead = yaml.safe_load((root / "configs/uhead/default.yaml").read_text(encoding="utf-8"))
-uhead["groups"] = os.environ["GROUPS"].split()
+uhead["groups"] = os.environ["FEATURE_GROUPS"].split()
 uhead["temporal_detector"] = os.environ["DETECTOR"]
 Path(os.environ["TRAIN_CONFIG"]).write_text(yaml.safe_dump(train, sort_keys=False), encoding="utf-8")
 Path(os.environ["UHEAD_CONFIG"]).write_text(yaml.safe_dump(uhead, sort_keys=False), encoding="utf-8")
 PY
+  # Обучение по эпохам (best.pt / last.pt) и метрики best.pt на validation-половине при каждом пороге.
   PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m uhead.train --tags hard --uhead "$uhead_config" \
     --train "$train_config" --data-root "$DATA_ROOT" --output "$checkpoint_dir" --device "$DEVICE" --flat-output --overwrite
-  PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m online_vllm.eval.export --model "$model_name" \
-    --checkpoint "$checkpoint_dir/final" --features "$VAL_FEATURES" --split validation \
-    --output "$result_dir/predictions_val.json" --device "$DEVICE"
-  PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m online_vllm.eval.thresholds \
-    --predictions "$result_dir/predictions_val.json" --output "$result_dir/thresholds_val.json" \
-    --thresholds "${THRESHOLDS[@]}"
-  ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" GROUPS="${groups[*]}" \
-    CHECKPOINT="$checkpoint_dir/final" RESULT="$result_dir" python - <<'PY'
+  cp "$checkpoint_dir"/{results.json,metrics.jsonl,split.json,predictions_validation.json} "$result_dir/"
+  ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" FEATURE_GROUPS="${groups[*]}" \
+    CHECKPOINT="$checkpoint_dir" RESULT="$result_dir" python - <<'PY'
 import json, os
 from pathlib import Path
 checkpoint = Path(os.environ["CHECKPOINT"])
 config = json.loads(checkpoint.joinpath("experiment.json").read_text(encoding="utf-8"))
+results = json.loads(checkpoint.joinpath("results.json").read_text(encoding="utf-8"))
 config.update({
     "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
-    "feature_groups": os.environ["GROUPS"].split(), "training_gt": "hard", "seed": 0,
-    "checkpoint_path": os.environ["CHECKPOINT"], "split": "validation",
-    "thresholds": [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99],
+    "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": "hard", "seed": 0,
+    "checkpoint_path": str(checkpoint / "best.pt"), "best_epoch": results["best_epoch"],
 })
 Path(os.environ["RESULT"]).joinpath("run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY

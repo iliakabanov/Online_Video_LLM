@@ -17,7 +17,7 @@
 | Attention | 12672 | 256 |
 | Entropy | 1728 | 64 |
 | Vision | 5120 | 128 |
-| Confidence | 15 | 32 |
+| Confidence | 19 | 32 |
 
 После конкатенации получается `736`, fusion даёт `512`, а итоговые logits имеют форму `[B, P]`.
 
@@ -33,12 +33,27 @@
 
 ## Запуск
 
+Из корня репозитория (пакет `uhead` лежит в `src/`):
+
 ```bash
-python -m uhead.train --tags hard --output outputs/group1_uhead --device cuda
-python -m uhead.train --tags step --step-window 5 --output outputs/group1_uhead --device cuda
-python -m uhead.train --tags sigmoid --sigmoid-slope 0.65 --output outputs/group1_uhead --device cuda
+PYTHONPATH=src python -m uhead.train --tags hard --output outputs/group1_uhead --device cuda
+PYTHONPATH=src python -m uhead.train --tags step --step-window 5 --output outputs/group1_uhead --device cuda
+PYTHONPATH=src python -m uhead.train --tags sigmoid --sigmoid-slope 0.65 --output outputs/group1_uhead --device cuda
 ```
 
 Аргумент `--uhead` задаёт архитектурный YAML, а `--train` — существующий тренировочный YAML с путями к shards и порогами. Для ablation удалите ненужные имена из `groups` в `configs/uhead/default.yaml`.
 
-В `final/` сохраняются `uhead.pt` (веса, включая normalizer buffers), `uhead.yaml`, `train.yaml` и `tags.json`. Загрузка: `from uhead.train import load_checkpoint; model = load_checkpoint(".../final"); tags = model.tag_settings`.
+## Validation и test
+
+- Признаки `features.eval` делятся **по видео** (seed из конфига) на две равные части: validation и test. Вопросы одного видео всегда в одной части; списки видео — в `split.json`. `data.eval_samples` здесь не используется.
+- После каждой эпохи в `metrics.jsonl` пишутся средний по батчам train loss и метрики validation; сохраняется `last.pt`, а при наименьшем validation loss — `best.pt`.
+- После обучения `best.pt` оценивается на validation при каждом пороге `eval.thresholds`. Итог — `results.json` (лучшая эпоха, классификационные метрики, онлайн-метрики по каждому порогу) и вероятности `predictions_validation.json` (формат `online_vllm.eval.export`).
+- Test обучение не трогает. По `results.json` выберите порог и оцените test отдельно:
+
+```bash
+PYTHONPATH=src python -m uhead.evaluate --run outputs/group1_uhead/hard --threshold 0.7 [--weights last.pt]
+```
+
+Результат — `<run>/test_best_tau0.7.json` (loss, классификационные и онлайн-метрики при этом пороге) и вероятности `predictions_test_best_tau0.7.json`.
+
+В каталоге запуска лежат `best.pt` и `last.pt` (веса, включая normalizer buffers), `uhead.yaml`, `train.yaml`, `tags.json`, `experiment.json`. Загрузка: `from uhead.train import load_checkpoint; model = load_checkpoint(".../hard")` (берётся `best.pt`; `last.pt` — через `filename="last.pt"`); `tags = model.tag_settings`.
