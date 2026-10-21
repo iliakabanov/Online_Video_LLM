@@ -27,6 +27,7 @@ from tqdm import tqdm
 from online_vllm.data.inputs import IGNORE, LETTERS, InputBuilder, answer_letter, format_prompt
 from online_vllm.data.labels import plan
 from online_vllm.data.schema import Record, load_jsonl
+from online_vllm.eval.answers import AnswerTrace
 from online_vllm.data.video import read_every
 from online_vllm.models.config import ModelConfig
 from online_vllm.models.model import attention_kernels
@@ -612,22 +613,30 @@ def lora_records(split: ClevrerLoRASplitConfig, data_root: str | Path) -> list[R
             + _records_for_first_videos(root / split.validation, split.validation_videos))
 
 
-def clevrer_lora_test_provider(run_dir: str | Path, *, data_root: str | Path,
-                               builder: InputBuilder) -> tuple[ClevrerLoRAValidationProvider, ClevrerLoRASplitConfig]:
-    """The test half recorded in ``split.json`` of a training run, with the data settings of that run."""
+def clevrer_lora_part_provider(run_dir: str | Path, part: str, *, data_root: str | Path, builder: InputBuilder) \
+        -> tuple[ClevrerLoRAValidationProvider, ClevrerLoRASplitConfig]:
+    """The validation or test half recorded in ``split.json`` of a training run, with the data settings of that run."""
+    if part not in ("validation", "test"):
+        raise ValueError("part must be validation or test")
     info = json.loads((Path(run_dir) / "split.json").read_text(encoding="utf-8"))
     data = dict(info["data"])
     data["train_frame_size"] = tuple(data["train_frame_size"])
     split = ClevrerLoRASplitConfig(**data)
     split.validate()
     root = Path(data_root)
-    test_videos = set(info["test_videos"])
+    videos = set(info[f"{part}_videos"])
     records = [record for record in _records_for_first_videos(root / split.validation, split.validation_videos)
-               if record.video in test_videos]
-    if len({record.video for record in records}) != len(test_videos) or len(records) != info["test_questions"]:
+               if record.video in videos]
+    if len({record.video for record in records}) != len(videos) or len(records) != info[f"{part}_questions"]:
         raise ValueError(f"{root / split.validation} no longer matches split.json of {run_dir}: "
-                         f"{len(records)} test questions, expected {info['test_questions']}")
+                         f"{len(records)} {part} questions, expected {info[f'{part}_questions']}")
     return ClevrerLoRAValidationProvider(records, data_root=root, builder=builder, split=split), split
+
+
+def clevrer_lora_test_provider(run_dir: str | Path, *, data_root: str | Path,
+                               builder: InputBuilder) -> tuple[ClevrerLoRAValidationProvider, ClevrerLoRASplitConfig]:
+    """The test half recorded in ``split.json`` of a training run, with the data settings of that run."""
+    return clevrer_lora_part_provider(run_dir, "test", data_root=data_root, builder=builder)
 
 
 def _move_inputs(inputs: Mapping[str, Any], device: torch.device | str) -> dict[str, Any]:
@@ -733,6 +742,28 @@ def evaluate_validation(model: torch.nn.Module, provider: ValidationProvider, *,
                                                resolution=(width, height), device=device,
                                                desc=f"{desc} {key}", total=total)
     return result
+
+
+@torch.inference_mode()
+def answer_traces(model: torch.nn.Module, provider: ClevrerLoRAValidationProvider, resolution: tuple[int, int], *,
+                  device: torch.device | str, desc: str = "Answers") -> list[AnswerTrace]:
+    """The model's answer distribution over the options as if the video ended after every pair, for every question:
+    one AnswerTrace (eval/answers.py) per question, the same probe as the validation, normalized over the options."""
+    training = model.training
+    model.eval()
+    traces = []
+    try:
+        for example in tqdm(provider.iter_choice_examples(resolution), total=len(provider.records), desc=desc,
+                            unit="q", dynamic_ncols=True):
+            pairs = range(example.layout.num_pairs)
+            logprobs = probe_letter_logprobs(model, example.inputs, example.layout, pairs, example.letter_ids,
+                                             device=device)
+            target = example.pair_by_time["target"]
+            traces.append(AnswerTrace(logprobs.softmax(-1).double().cpu().numpy(), example.answer_index, target,
+                                      target))
+    finally:
+        model.train(training)
+    return traces
 
 
 def save_lora_adapter(model: torch.nn.Module, path: str | Path, *, metadata: Mapping[str, Any] | None = None) -> Path:

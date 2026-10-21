@@ -326,6 +326,62 @@ def test_cached_vision_validation_equals_encoding_the_pixels(builder, tiny_base,
                                        torch.tensor(plain["predictions"][point]["scores"]), rtol=1e-4, atol=1e-4)
 
 
+def test_answer_traces_agree_with_validation_and_disabled_adapter_is_the_base(builder, tiny_base, tmp_path):
+    import numpy as np
+    from lora.lora import ClevrerLoRAValidationProvider, answer_traces, evaluate_choice_examples
+
+    data, records = _toy_videos(tmp_path)
+    tiny = _RemapBuilder(builder.processor)
+    provider = ClevrerLoRAValidationProvider(records, data_root=data, builder=tiny,
+                                             split=ClevrerLoRASplitConfig(num_workers=0))
+    model = _tiny_model(tiny_base, lora=True)
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if ".lora_B" in name:
+                parameter.normal_(std=0.5)  # an adapter that changes the answers
+    traces = answer_traces(model, provider, (28, 28), device="cpu")
+    rows = evaluate_choice_examples(model, list(provider.iter_choice_examples((28, 28))), resolution=(28, 28),
+                                    device="cpu")["predictions"]
+    for trace, row in zip(traces, rows):
+        assert trace.probabilities.shape == (4, 2) and trace.target_pair == row["predictions"]["target"]["last_pair"]
+        for point in ("start", "target", "end"):
+            prediction = row["predictions"][point]
+            expected = torch.tensor(prediction["scores"]).softmax(-1).numpy()
+            np.testing.assert_allclose(trace.probabilities[prediction["last_pair"]], expected, rtol=1e-4, atol=1e-5)
+    with model.backbone.disable_adapter():
+        disabled = answer_traces(model, provider, (28, 28), device="cpu")
+    base = answer_traces(_tiny_model(tiny_base, lora=False), provider, (28, 28), device="cpu")
+    for a, b, adapted in zip(disabled, base, traces):
+        np.testing.assert_allclose(a.probabilities, b.probabilities, rtol=1e-4, atol=1e-6)
+    assert any(not np.allclose(a.probabilities, t.probabilities, atol=1e-4) for a, t in zip(disabled, traces))
+
+
+def test_answer_curve_plot(tmp_path):
+    import importlib.util
+    import sys
+    from pathlib import Path
+    import numpy as np
+    from online_vllm.eval.answers import AnswerTrace, answer_curves
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        spec = importlib.util.spec_from_file_location("lora_answer_curves", scripts / "lora_answer_curves.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(scripts))
+    rng = np.random.default_rng(0)
+    results = {}
+    for name in ("none", "best"):
+        traces = [AnswerTrace(rng.dirichlet(np.ones(3), 64), int(rng.integers(3)), t, t) for t in rng.integers(5, 60, 20)]
+        results[name] = {**answer_curves(traces, range(-30, 41)), "by_pair": module.pair_curve(traces),
+                         "mean_target_pair": float(np.mean([t.target_pair for t in traces]))}
+    assert [row["pair"] for row in results["best"]["by_pair"]] == list(range(64))
+    module.plot(results, tmp_path / "curves.png", "test")
+    assert (tmp_path / "curves.png").stat().st_size > 0
+
+
 def test_length_grouped_batches_cover_every_example_once_with_similar_lengths():
     from lora.lora import _LengthGroupedBatches
 
