@@ -42,7 +42,8 @@ def main() -> None:
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     provider, split = clevrer_lora_test_provider(run, data_root=args.data_root, builder=builder)
     width, height = split.train_frame_size
-    result = evaluate_validation(model, provider, resolutions=((width, height),), device=args.device)[f"{width}x{height}"]
+    result = evaluate_validation(model, provider, resolutions=((width, height),), device=args.device,
+                                 desc=f"Test, adapter {args.adapter}")[f"{width}x{height}"]
     predictions = result.pop("predictions")
 
     metadata = {"run": str(run), "adapter": args.adapter, "split": "test", "questions": len(provider.records),

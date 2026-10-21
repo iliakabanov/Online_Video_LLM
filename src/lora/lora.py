@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from online_vllm.data.inputs import InputBuilder, answer_letter, format_prompt
 from online_vllm.data.inputs import IGNORE
@@ -543,13 +544,14 @@ def _choice_scores(model: torch.nn.Module, prompt: Mapping[str, Any], choices: S
 
 @torch.inference_mode()
 def evaluate_choice_examples(model: torch.nn.Module, examples: Iterable[ChoiceEvaluationExample], *,
-                             resolution: tuple[int, int], device: torch.device | str) -> dict[str, Any]:
-    """Exact multiple-choice conditional likelihood at start/target/end."""
+                             resolution: tuple[int, int], device: torch.device | str,
+                             desc: str = "Evaluation", total: int | None = None) -> dict[str, Any]:
+    """Exact multiple-choice conditional likelihood at every point of TIME_POINTS; a progress bar per call."""
     training = model.training
     model.eval()
     rows: list[dict[str, Any]] = []
     try:
-        for example in examples:
+        for example in tqdm(examples, total=total, desc=desc, unit="q", dynamic_ncols=True):
             if set(example.inputs_by_time) != set(TIME_POINTS):
                 raise ValueError(f"inputs_by_time must contain exactly {', '.join(TIME_POINTS)}")
             if not 0 <= example.answer_index < len(example.choice_token_ids):
@@ -580,13 +582,16 @@ def evaluate_choice_examples(model: torch.nn.Module, examples: Iterable[ChoiceEv
 
 
 def evaluate_validation(model: torch.nn.Module, provider: ValidationProvider, *,
-                        resolutions: Sequence[tuple[int, int]], device: torch.device | str) -> dict[str, Any]:
+                        resolutions: Sequence[tuple[int, int]], device: torch.device | str,
+                        desc: str = "Validation") -> dict[str, Any]:
     """Evaluate every requested resolution separately; results are never averaged."""
     result: dict[str, Any] = {}
+    total = len(provider.records) if hasattr(provider, "records") else None
     for width, height in resolutions:
         key = f"{width}x{height}"
         result[key] = evaluate_choice_examples(model, provider.iter_choice_examples((width, height)),
-                                               resolution=(width, height), device=device)
+                                               resolution=(width, height), device=device,
+                                               desc=f"{desc} {key}", total=total)
     return result
 
 
@@ -663,7 +668,8 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
     batches = len(train_loader)
     optimizer.zero_grad(set_to_none=True)
     window_losses: list[float] = []
-    for batch_index, batch in enumerate(train_loader, 1):
+    progress = tqdm(train_loader, total=batches, desc=f"Epoch {epoch}", unit="batch", dynamic_ncols=True)
+    for batch_index, batch in enumerate(progress, 1):
         # For a short final window (e.g. 3 batches with accumulation 2), this
         # is 1 rather than the nominal accumulation factor 2.
         window_start = ((batch_index - 1) // gradient_accumulation) * gradient_accumulation
@@ -678,6 +684,7 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
         value = float(loss.detach().cpu())
         losses.append(value)
         window_losses.append(value)
+        progress.set_postfix(loss=f"{sum(losses) / len(losses):.4f}")  # running mean over the epoch
         if batch_index % gradient_accumulation and batch_index != batches:
             continue
         # clip_grad_norm_ returns the total norm before clipping.
@@ -695,6 +702,7 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
             "effective_accumulation_steps": window_size,
         })
         window_losses = []
+    progress.close()
     return float(sum(losses) / len(losses)), steps, step_records
 
 
@@ -761,7 +769,7 @@ def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoR
         if validation_provider is None:
             return
         validation = evaluate_validation(model, validation_provider, resolutions=(validation_resolution,),
-                                         device=device)
+                                         device=device, desc=f"Validation after epoch {epoch}")
         no_predictions = {key: {k: v for k, v in value.items() if k != "predictions"}
                           for key, value in validation.items()}
         if baseline is None:
