@@ -144,18 +144,32 @@ def _records_for_first_videos(path: Path, video_limit: int) -> list[Record]:
     return [record for record in records if record.video in selected]
 
 
-def _prefix_context(record: Record, *, data_root: Path, builder: InputBuilder, frame_stride: int,
-                    speak_delay: int, frame_size: tuple[int, int]) -> tuple[Any, int, int]:
-    """Decode once and return full sampled frames, target patch, and available patch count."""
+def _decode(record: Record, *, data_root: Path, builder: InputBuilder, frame_stride: int,
+            frame_size: tuple[int, int]) -> tuple[Any, int]:
+    """The video's sampled frames cut to whole temporal patches, and the number of patches."""
+    frames = read_every(data_root / record.video, frame_stride, frame_size)
+    patches = len(frames) // builder.temporal_patch
+    return frames[:patches * builder.temporal_patch], patches
+
+
+def _target_patch(record: Record, *, builder: InputBuilder, frame_stride: int, speak_delay: int, patches: int) -> int:
     state_plan = plan(record, frame_stride, speak_delay, builder.temporal_patch)
     if state_plan is None:
         raise ValueError(f"{record.id}: target patch does not fit the schema video length")
-    frames = read_every(data_root / record.video, frame_stride, frame_size)
-    patches = len(frames) // builder.temporal_patch
     target = len(state_plan.labels) - 1
     if patches < 1 or target >= patches:
         raise ValueError(f"{record.id}: decoded video has {patches} temporal patches, needs target {target}")
-    return frames[:patches * builder.temporal_patch], target, patches
+    return target
+
+
+def _prefix_context(record: Record, *, data_root: Path, builder: InputBuilder, frame_stride: int,
+                    speak_delay: int, frame_size: tuple[int, int]) -> tuple[Any, int, int]:
+    """Decode once and return full sampled frames, target patch, and available patch count."""
+    frames, patches = _decode(record, data_root=data_root, builder=builder, frame_stride=frame_stride,
+                              frame_size=frame_size)
+    target = _target_patch(record, builder=builder, frame_stride=frame_stride, speak_delay=speak_delay,
+                           patches=patches)
+    return frames, target, patches
 
 
 def _build_sft_example(builder: InputBuilder, record: Record, frames: Any, *, fps: float) -> dict[str, Any]:
@@ -425,13 +439,27 @@ class ClevrerLoRAValidationProvider:
         self.data_root, self.builder, self.split = Path(data_root), builder, split
 
     def iter_choice_examples(self, resolution: tuple[int, int]) -> Iterable[ChoiceEvaluationExample]:
+        """The questions video by video. DataLoader workers decode and encode the next videos while the model
+        evaluates the current one."""
         if len(resolution) != 2 or any(side <= 0 or side % 28 for side in resolution):
             raise ValueError("evaluation resolution must be [width, height], multiples of 28")
-        tokenizer = self.builder.processor.tokenizer
+        by_video: dict[str, list[Record]] = {}
         for record in self.records:
-            frames, target, patches = _prefix_context(
-                record, data_root=self.data_root, builder=self.builder, frame_stride=self.split.frame_stride,
-                speak_delay=self.split.speak_delay, frame_size=resolution)
+            by_video.setdefault(record.video, []).append(record)
+        loader = DataLoader(_VideoExamples(self, list(by_video.values()), tuple(resolution)), batch_size=None,
+                            num_workers=self.split.num_workers, collate_fn=_as_is)
+        for examples in loader:
+            yield from examples
+
+    def video_examples(self, records: Sequence[Record], resolution: tuple[int, int]) -> list[ChoiceEvaluationExample]:
+        """All questions of one video: the video is decoded once, and its pixel tensor is shared by the questions."""
+        tokenizer = self.builder.processor.tokenizer
+        frames, patches = _decode(records[0], data_root=self.data_root, builder=self.builder,
+                                  frame_stride=self.split.frame_stride, frame_size=resolution)
+        examples, video = [], None
+        for record in records:
+            target = _target_patch(record, builder=self.builder, frame_stride=self.split.frame_stride,
+                                   speak_delay=self.split.speak_delay, patches=patches)
             letters = [tokenizer(letter, add_special_tokens=False).input_ids for letter in LETTERS[:len(record.choices)]]
             if any(len(ids) != 1 for ids in letters):
                 raise ValueError(f"{record.id}: option letters must be single tokens")
@@ -442,11 +470,35 @@ class ClevrerLoRAValidationProvider:
             lay = layout(inputs, prompt, tokenizer)
             if lay.num_pairs != patches:
                 raise ValueError(f"{record.id}: {lay.num_pairs} pairs in the input, {patches} decoded")
-            yield ChoiceEvaluationExample(
+            # Same frames, same pixels: one tensor for all questions (~65 MB at 252x168), sent from a worker once.
+            if video is None:
+                video = inputs
+            elif torch.equal(inputs["video_grid_thw"], video["video_grid_thw"]):
+                inputs["pixel_values_videos"] = video["pixel_values_videos"]
+            examples.append(ChoiceEvaluationExample(
                 record_id=record.id, answer_index=record.choices.index(record.answers[0].answer),
                 letter_ids=torch.tensor([ids[0] for ids in letters]), inputs=inputs, layout=lay,
                 pair_by_time={"start": 0, "target": target, "answerable": answerable, "end": patches - 1},
-                family=record.meta.get("family"))
+                family=record.meta.get("family")))
+        return examples
+
+
+def _as_is(item):
+    return item
+
+
+class _VideoExamples(torch.utils.data.Dataset):
+    """Item i: every evaluation example of the i-th video of a provider (decoded once)."""
+
+    def __init__(self, provider: ClevrerLoRAValidationProvider, videos: Sequence[Sequence[Record]],
+                 resolution: tuple[int, int]):
+        self.provider, self.videos, self.resolution = provider, videos, resolution
+
+    def __len__(self) -> int:
+        return len(self.videos)
+
+    def __getitem__(self, index: int) -> list[ChoiceEvaluationExample]:
+        return self.provider.video_examples(self.videos[index], self.resolution)
 
 
 def build_clevrer_lora_data(*, data_root: str | Path, builder: InputBuilder, split: ClevrerLoRASplitConfig,

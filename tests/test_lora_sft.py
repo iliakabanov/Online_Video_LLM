@@ -22,6 +22,7 @@ from lora.lora import (
     configure_gradient_checkpointing,
     sample_prefix,
 )
+from online_vllm.data.inputs import InputBuilder
 from online_vllm.data.schema import Interval, Record, save_jsonl
 
 
@@ -235,6 +236,47 @@ def test_answer_position_loss_equals_qwen_causal_lm_loss_and_reaches_lora(builde
     loss.backward()
     grads = [p.grad for name, p in model.named_parameters() if ".lora_A" in name]
     assert grads and all(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+TOY_TO_TINY = ((2, 60), (3, 61), (4, 62), (5, 63))  # toy tokenizer special IDs -> tiny Qwen vocabulary
+
+
+class _RemapBuilder(InputBuilder):
+    def _encode(self, prompt, frames, fps):
+        x = super()._encode(prompt, frames, fps)
+        ids = x["input_ids"].clone()
+        for old, new in TOY_TO_TINY:
+            x["input_ids"][ids == old] = new
+        return x
+
+
+def test_validation_decodes_each_video_once_in_workers(builder, tiny_base, tmp_path):
+    from lora.lora import TIME_POINTS, ClevrerLoRAValidationProvider, _decode, evaluate_choice_examples
+    from online_vllm.data.inputs import format_prompt
+    from test_train import write_video
+
+    data = tmp_path / "data"
+    (data / "videos").mkdir(parents=True)
+    for v in range(2):
+        write_video(data / "videos" / f"v{v}.mp4", n=8, size=28)
+    records = [Record(f"v{v}-q{q}", "toy", "validation", f"videos/v{v}.mp4", 25, 8, "question", ["green", "red"], 0,
+                      [Interval(2 + 2 * q, 7, "green")], {"scene_index": v, "family": "toy"})
+               for v in range(2) for q in range(2)]
+    tiny = _RemapBuilder(builder.processor)
+    provider = ClevrerLoRAValidationProvider(records, data_root=data, builder=tiny,
+                                             split=ClevrerLoRASplitConfig(num_workers=1))
+    examples = list(provider.iter_choice_examples((28, 28)))
+    assert [e.record_id for e in examples] == [r.id for r in records]
+    assert examples[0].inputs["pixel_values_videos"] is examples[1].inputs["pixel_values_videos"]
+    assert examples[1].inputs["pixel_values_videos"] is not examples[2].inputs["pixel_values_videos"]
+    for example, record in zip(examples, records):  # the same as preparing every question on its own
+        frames, _ = _decode(record, data_root=data, builder=tiny, frame_stride=1, frame_size=(28, 28))
+        reference = tiny._encode(format_prompt(record.question, record.choices), frames, 25)
+        for key in ("input_ids", "pixel_values_videos", "video_grid_thw"):
+            torch.testing.assert_close(example.inputs[key], reference[key])
+    assert examples[0].pair_by_time["target"] < examples[1].pair_by_time["target"]
+    metrics = evaluate_choice_examples(_tiny_model(tiny_base, lora=False), examples, resolution=(28, 28), device="cpu")
+    assert metrics["count"] == 4 and all(0 <= metrics[f"{point}_micro_accuracy"] <= 1 for point in TIME_POINTS)
 
 
 def test_cached_probes_equal_separate_forwards_on_truncated_videos(builder, tiny_base):
