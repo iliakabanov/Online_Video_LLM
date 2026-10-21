@@ -109,3 +109,36 @@ def test_choice_probabilities_and_answer_curves():
                                                            "p_answer": .75, "chance": .5})
     assert [row["count"] for row in result["curve"]] == [1, 1, 0]
     assert result["curve"][0]["p_correct"] == pytest.approx(.75)
+
+
+def test_readiness_curves_agree_with_online_metrics():
+    from online_vllm.eval.readiness_plot import load_traces, readiness_curves
+    probabilities = [[.1, .1, .9, .9, .9], [.9, .1, .1, .1, .1], [.1, .1, .1, .1, .9], [.1] * 5]
+    payload = {"predictions": [{"record_id": str(i), "probabilities": p, "target_pair": target, "visible_pair": 2,
+                                "answer_correct": [False, False, True, True, True]}
+                               for i, (p, target) in enumerate(zip(probabilities, [2, 2, 2, 2]))]}
+    result = readiness_curves(load_traces(payload), offsets=range(-2, 3), taus=[.5], examples=4)
+    online = evaluate_readiness(np.array(probabilities), [2] * 4, [2] * 4, [.5], 1, 1)["thresholds"]["0.5"]
+    firing = result["firing"]["0.5"]
+    for outcome in ("premature", "on_target", "late", "missed"):
+        assert firing["outcomes"][outcome] == online[f"{outcome}_rate"]
+    # Сдвиги срабатываний: 0, −2, +2; четвёртый вопрос не сработал.
+    assert firing["share"] == [.25, 0, .25, 0, .25]
+    assert result["curve"][2]["median"] == pytest.approx(.1) and result["curve"][2]["answer_accuracy"] == 1
+    # До visible_pair = 2: всплеск только у вопроса 1, на одной паре из двух.
+    background = next(row for row in result["background"] if row["tau"] == .5)
+    assert background == {"tau": .5, "any_pair": .25, "pair_share": .125}
+    assert sorted(e["outcome"] for e in result["examples"]) == ["late", "missed", "on_target", "premature"]
+
+
+def test_shift_by_target_time_separates_event_following_from_fixed_time():
+    from online_vllm.eval.readiness_plot import ReadinessTrace, by_target_time
+    pairs = np.arange(20)
+    follows = [ReadinessTrace((pairs >= t).astype(float), t, t) for t in (4, 8, 12, 16)]
+    fixed = [ReadinessTrace((pairs >= 10).astype(float), t, t) for t in (4, 8, 12, 16)]
+    shift = lambda traces: [row["median"] for row in by_target_time(traces, [0], .5, groups=2)["shift"]]
+    assert shift(follows) == [0, 0, 0, 0]
+    assert shift(fixed) == [6, 2, -2, -6]
+    groups = by_target_time(fixed, [0], .5, groups=2)["groups"]
+    assert [(g["first_target"], g["last_target"], g["count"]) for g in groups] == [(4, 8, 2), (12, 16, 2)]
+    assert groups[0]["outcomes"]["late"] == 1 and groups[1]["outcomes"]["premature"] == 1

@@ -72,6 +72,13 @@ PYTHONPATH=src python -m online_vllm.eval.answers --features <каталог п�
     --output results/answers/val.json --plot results/answers/val.png [--split checkpoints/.../split.json --part test]
 ```
 
+Вероятность готовности головы во времени строится по сохранённым предсказаниям, без признаков и Qwen. Получается четыре графика: P(готов) по сдвигу от целевой пары рядом с точностью ответа Qwen; где P впервые превышает каждый τ; всплески или фон до появления ответа; отдельные вопросы с разными исходами; кривые по квартилям момента появления ответа и сдвиг срабатывания в зависимости от этого момента. Если голова следует за событием, сдвиг держится около 0. Если она выучила типичное время ответа, сдвиг идёт с наклоном −1: на ранних событиях она опаздывает, на поздних срабатывает раньше времени.
+
+```bash
+PYTHONPATH=src python -m online_vllm.eval.readiness_plot --predictions results/<arch>/<id>/predictions_validation.json \
+    --output results/<arch>/<id>/readiness_curves.json --plot results/<arch>/<id>/readiness_curves.png [--taus 0.5 0.7 0.9]
+```
+
 Веса и результаты можно разнести по разным каталогам: `--output` получает веса, конфиги и `split.json`, а `--results` (у `uhead.train` и `uhead.evaluate`) — `metrics.jsonl`, `results.json` и предсказания. Без `--results` всё пишется в `--output`. Так делает `experiment_launcher/common.sh`: веса в `checkpoints/<arch>/<id>/` (не в git), результаты в `results/<arch>/<id>/` в корне репозитория.
 
 В каталоге запуска лежат `best.pt` и `last.pt` (веса, включая normalizer buffers), `uhead.yaml`, `train.yaml`, `tags.json`, `experiment.json`. Загрузка: `from uhead.train import load_checkpoint; model = load_checkpoint(".../hard")` (берётся `best.pt`; `last.pt` — через `filename="last.pt"`); `tags = model.tag_settings`.
