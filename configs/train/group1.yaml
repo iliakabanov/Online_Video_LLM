@@ -2,13 +2,15 @@
 # Pair with configs/model/qwen_3b_head.yaml (frozen backbone, no LoRA):
 #   scripts/extract_features.py --split train|eval   once: backbone features of every patch of every video
 #   scripts/train_head.py                            the head on those features, any number of times
-data:
-  train: processed/clevrer_proactive/train_group1.jsonl   # relative to DATA_ROOT
-  eval: processed/clevrer_proactive/val_group1.jsonl
+data:                      # the features halves of the group-1 subsets; the LoRA halves fine-tune Qwen (README §11)
+  train: processed/clevrer_proactive/train_group1_features.jsonl   # relative to DATA_ROOT
+  eval: processed/clevrer_proactive/val_group1_features.jsonl
   eval_samples: 2000       # fixed random subset of eval for the evaluations during training; the final one uses all
 features:                  # src/online_vllm/train/FEATURES.md
-  train: features/group1_s1_252x168/train   # where extract_features.py writes and train_head.py reads (DATA_ROOT)
-  eval: features/group1_s1_252x168/val
+  # where extract_features.py writes and train_head.py reads (DATA_ROOT). New directories for the features halves:
+  # features extracted earlier (group1_s1_252x168/*) came from the first videos, now the LoRA half.
+  train: features/group1_half_s1_252x168/train
+  eval: features/group1_half_s1_252x168/val
   lm_layers: [12, 18, 24, 36]   # extraction: language-model layers 1..36 (36: after the final norm)
   vis_layers: [7, 15, 23, 31]   # extraction: vision-encoder blocks from 0 (these four attend over the whole pair)
   prev_pairs: 3                 # extraction: attention groups for pairs p-1 .. p-3 one by one, earlier pairs as one

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from dataset_builders.clevrer_proactive.paths import PROCESSED
-from dataset_builders.clevrer_proactive.subset import SPLITS, asks_last, keep
+from dataset_builders.clevrer_proactive.subset import HALVES, SPLITS, asks_last, keep
 from online_vllm.data.schema import load_jsonl
 
 N_CHOICES = {"yesno": 2, "material": 2, "shape": 3}
@@ -60,3 +60,17 @@ def test_group1_subset_matches_keep(name):
     qs = json.loads(path.read_text(encoding="utf-8"))
     dropped = [q["id"] for q in qs if not keep(q)]
     assert not dropped, f"{len(dropped)} questions fail subset.keep (e.g. {dropped[:3]}); rerun subset"
+
+
+@pytest.mark.parametrize("name", SPLITS.values())
+def test_lora_and_features_halves_split_the_videos(name):
+    paths = [PROCESSED / f"{name}_{half}.jsonl" for half in HALVES]
+    if not all(path.exists() for path in paths):
+        pytest.skip(f"halves of {name} not built")
+    whole = list(load_jsonl(PROCESSED / f"{name}.jsonl"))
+    lora, features = (list(load_jsonl(path)) for path in paths)
+    assert sorted(r.id for r in lora + features) == sorted(r.id for r in whole)  # every question, once
+    lora_videos, feature_videos = {r.video for r in lora}, {r.video for r in features}
+    assert not lora_videos & feature_videos  # no video in both halves
+    assert len(feature_videos) - len(lora_videos) in (0, 1)
+    assert max(r.meta["scene_index"] for r in lora) < min(r.meta["scene_index"] for r in features)

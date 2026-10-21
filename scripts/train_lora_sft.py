@@ -1,7 +1,9 @@
 """Train Qwen2.5-VL LoRA SFT on the documented CLEVRER group-1 video split.
 
-The first 5,000 scene-indexed train videos train LoRA. The first 2,000 scene-indexed validation videos are halved
-by video (with a fixed seed, the same for every run): the validation half selects the adapter by accuracy on a prefix
+Data: the LoRA halves of the group-1 subsets (README §11; the other halves are for the features of the readiness
+heads). The videos of train_group1_lora.jsonl train LoRA (--train-videos: only the first n). The videos of
+val_group1_lora.jsonl (--validation-videos: only the first m) are halved by video (with a fixed seed, the same for
+every run with the same m): the validation half selects the adapter by accuracy on a prefix
 ending uniformly between the target and the end of the video (fixed per question; start, target and end are reported
 too), evaluated before training and after every epoch at the training frame size; the test half is left for
 scripts/evaluate_lora_sft.py (split.json).
@@ -44,8 +46,11 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", REPO / "data"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--train-videos", type=int, default=split_defaults.train_videos)
-    parser.add_argument("--validation-videos", type=int, default=split_defaults.validation_videos)
+    parser.add_argument("--train-videos", type=int, default=split_defaults.train_videos,
+                        help="the first n videos of the training file (default: all)")
+    parser.add_argument("--validation-videos", type=int, default=split_defaults.validation_videos,
+                        help="the first m videos of the validation file, halved into validation and test (default: "
+                             "all). Keep m the same in runs to be compared: it fixes their validation and test")
     parser.add_argument("--epochs", type=int, default=defaults.epochs)
     parser.add_argument("--lr", type=float, default=defaults.learning_rate, help="constant learning rate")
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size, help="sequences per forward pass")

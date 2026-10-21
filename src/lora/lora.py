@@ -90,12 +90,13 @@ class PrefixSelection:
 
 @dataclass(frozen=True)
 class ClevrerLoRASplitConfig:
-    """The video-disjoint LoRA partitions documented in CLEVRER-Proactive README §11."""
+    """The video-disjoint LoRA partitions documented in CLEVRER-Proactive README §11: the LoRA halves of the group-1
+    subsets (the other halves are for the features of the readiness heads)."""
 
-    train: str = "processed/clevrer_proactive/train_group1.jsonl"
-    validation: str = "processed/clevrer_proactive/val_group1.jsonl"
-    train_videos: int = 5000
-    validation_videos: int = 2000
+    train: str = "processed/clevrer_proactive/train_group1_lora.jsonl"
+    validation: str = "processed/clevrer_proactive/val_group1_lora.jsonl"
+    train_videos: int | None = None  # the first n videos by scene_index; None: all of the file
+    validation_videos: int | None = None  # the first m videos, halved into validation and test; None: all
     frame_stride: int = 1
     speak_delay: int = 0
     train_frame_size: tuple[int, int] = (252, 168)  # width, height
@@ -104,8 +105,8 @@ class ClevrerLoRASplitConfig:
     vision_cache: str | None = None
 
     def validate(self) -> None:
-        if self.train_videos < 1 or self.validation_videos < 1:
-            raise ValueError("train_videos and validation_videos must be positive")
+        if any(n is not None and n < 1 for n in (self.train_videos, self.validation_videos)):
+            raise ValueError("train_videos and validation_videos must be positive or None (all)")
         if self.frame_stride < 1 or self.speak_delay < 0 or self.num_workers < 0:
             raise ValueError("invalid frame_stride, speak_delay, or num_workers")
         if len(self.train_frame_size) != 2 or any(side <= 0 or side % 28 for side in self.train_frame_size):
@@ -132,8 +133,8 @@ def sample_prefix(target_pair: int, num_temporal_patches: int, *, seed: int, epo
     return PrefixSelection(rng.randint(target_pair, num_temporal_patches - 1), "after_target")
 
 
-def _records_for_first_videos(path: Path, video_limit: int) -> list[Record]:
-    """Select every question from the first ``video_limit`` scene-indexed videos.
+def _records_for_first_videos(path: Path, video_limit: int | None) -> list[Record]:
+    """Select every question from the first ``video_limit`` scene-indexed videos (all of them for None).
 
     The group-1 files are scene-index ordered, but sorting explicitly by the
     exported ``meta.scene_index`` makes the README partition invariant robust to
@@ -148,6 +149,8 @@ def _records_for_first_videos(path: Path, video_limit: int) -> list[Record]:
         previous = scene_by_video.setdefault(record.video, scene)
         if previous != scene:
             raise ValueError(f"{record.id}: one video has conflicting scene_index values")
+    if video_limit is None:
+        return records
     if len(scene_by_video) < video_limit:
         raise ValueError(f"{path}: requested {video_limit} videos, only {len(scene_by_video)} available")
     selected = {video for video, _ in sorted(scene_by_video.items(), key=lambda item: item[1])[:video_limit]}

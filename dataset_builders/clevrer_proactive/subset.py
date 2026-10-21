@@ -12,7 +12,11 @@ Dropped:
     it is the last one only at the end of the video. Every other official query is final at its start_frame.
 In what is left an answer appears at an event inside the video and does not change.
 
-    python -m dataset_builders.clevrer_proactive.subset            # -> train_group1.*, val_group1.*
+Each subset is also halved by video, in scene_index order (README §11): <name>_lora.jsonl, the first half of the
+videos, for fine-tuning Qwen with LoRA; <name>_features.jsonl, the second half, for the features of the readiness
+heads. All questions of a video stay in one half, so a fine-tuned model never gives features of a video it learned.
+
+    python -m dataset_builders.clevrer_proactive.subset   # -> train_group1.*, val_group1.*, *_lora.jsonl, *_features.jsonl
 """
 import json
 import re
@@ -25,6 +29,7 @@ from .paths import PROCESSED
 
 DROP_FAMILIES = {"cause_collision", "cause_exit", "will_collide", "will_exit", "will_start"}
 SPLITS = {"train": "train_group1", "validation": "val_group1"}
+HALVES = ("lora", "features")  # first and second half of the videos
 
 
 def asks_last(q):
@@ -35,6 +40,17 @@ def asks_last(q):
 def keep(q):
     return (q["group"] == 1 and q["family"] not in DROP_FAMILIES and not q.get("resolved_at_end")
             and not asks_last(q))
+
+
+def halves(records):
+    """The questions of the first and of the second half of the videos by scene_index (the first half is the
+    smaller one for an odd number of videos), each in its original order."""
+    scenes = {}
+    for r in records:
+        scenes.setdefault(r.video, r.meta["scene_index"])
+    videos = sorted(scenes, key=scenes.__getitem__)
+    first = set(videos[:len(videos) // 2])
+    return [r for r in records if r.video in first], [r for r in records if r.video not in first]
 
 
 def main():
@@ -48,6 +64,9 @@ def main():
             r.check()
         save_jsonl(records, PROCESSED / f"{name}.jsonl")
         print(f"{len(qs)} -> {len(kept)} questions -> {PROCESSED / name}.json, .jsonl")
+        for half, part in zip(HALVES, halves(records)):
+            save_jsonl(part, PROCESSED / f"{name}_{half}.jsonl")
+            print(f"  {half}: {len({r.video for r in part})} videos, {len(part)} questions -> {name}_{half}.jsonl")
 
 
 if __name__ == "__main__":

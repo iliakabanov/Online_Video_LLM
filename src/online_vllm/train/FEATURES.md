@@ -214,7 +214,9 @@ export HF_HOME=/путь/на/большом/диске/hf     # куда ска
 
 ```bash
 VIDEOS=all bash scripts/prepare_clevrer_proactive.sh     # вопросы, аннотации, генерация, видео train + validation
-python -m dataset_builders.clevrer_proactive.subset      # train_group1.jsonl (64 947 вопросов), val_group1.jsonl (32 521)
+python -m dataset_builders.clevrer_proactive.subset      # признаки берутся из вторых половин по видео:
+                                                         # train_group1_features.jsonl (32 332 вопроса), val_group1_features.jsonl (16 187)
+                                                         # первые половины (*_lora.jsonl) — для LoRA (README датасета, раздел 11)
 python -m pytest -q                                      # 36 passed
 ```
 
@@ -250,7 +252,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwe
 
 | поле | значение |
 |---|---|
-| `train`, `eval` | каталоги признаков относительно `DATA_ROOT`: `features/group1_s1_252x168/train` и `…/val` |
+| `train`, `eval` | каталоги признаков относительно `DATA_ROOT`: `features/group1_half_s1_252x168/train` и `…/val` (из `*_features.jsonl`; старые `group1_s1_252x168/*` сняты с видео, которые теперь отданы LoRA) |
 | `lm_layers`, `vis_layers`, `prev_pairs`, `top_tokens` | состав признаков (разделы выше) |
 | `batch_size` | 4: сколько вопросов за один проход модели (справа паддинг, результат не зависит от размера пакета). Видеопамять растёт примерно на 1 ГБ на вопрос (оценка): при 4 это ~14 ГБ, на A100 40 ГБ можно больше. Подобрать по скорости на шаге 6 |
 | `shard_gb` | 20: размер шарда, после которого он уходит на Drive |

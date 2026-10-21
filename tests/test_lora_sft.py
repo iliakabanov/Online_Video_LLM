@@ -583,8 +583,16 @@ def test_saved_adapter_loads_into_a_fresh_model(tiny_base, tmp_path):
 
 def test_lora_checkpoint_selection_metric_is_answerable_prefix_accuracy():
     assert SELECTION_METRIC == "answerable_micro_accuracy"
-    assert ClevrerLoRASplitConfig().train_videos == 5000
-    assert ClevrerLoRASplitConfig().validation_videos == 2000
+    split = ClevrerLoRASplitConfig()  # the LoRA halves of README §11, whole
+    assert split.train.endswith("train_group1_lora.jsonl") and split.validation.endswith("val_group1_lora.jsonl")
+    assert split.train_videos is None and split.validation_videos is None
+
+
+def test_no_video_limit_takes_the_whole_file(tmp_path):
+    records = _scene_records(5)
+    save_jsonl(list(reversed(records)), tmp_path / "all.jsonl")
+    assert len(_records_for_first_videos(tmp_path / "all.jsonl", None)) == len(records)
+    assert {r.video for r in _records_for_first_videos(tmp_path / "all.jsonl", 2)} == {"v0.mp4", "v1.mp4"}
 
 
 def test_accuracy_deltas_are_percentage_points_and_resolution_local():
