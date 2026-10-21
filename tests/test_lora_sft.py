@@ -242,12 +242,119 @@ TOY_TO_TINY = ((2, 60), (3, 61), (4, 62), (5, 63))  # toy tokenizer special IDs 
 
 
 class _RemapBuilder(InputBuilder):
-    def _encode(self, prompt, frames, fps):
-        x = super()._encode(prompt, frames, fps)
+    @staticmethod
+    def _remap(x):
         ids = x["input_ids"].clone()
         for old, new in TOY_TO_TINY:
             x["input_ids"][ids == old] = new
         return x
+
+    def _encode(self, prompt, frames, fps):
+        return self._remap(super()._encode(prompt, frames, fps))
+
+    def _encode_tokens(self, prompt, video_grid_thw, second_per_grid_ts):
+        return self._remap(super()._encode_tokens(prompt, video_grid_thw, second_per_grid_ts))
+
+
+def _toy_videos(tmp_path, n_videos=2, per_video=2):
+    """Videos of 8 frames 28 x 28 (4 temporal patches) and their questions, in a group-1 style JSONL."""
+    from test_train import write_video
+    data = tmp_path / "data"
+    (data / "videos").mkdir(parents=True)
+    for v in range(n_videos):
+        write_video(data / "videos" / f"v{v}.mp4", n=8, size=28)
+    records = [Record(f"v{v}-q{q}", "toy", "train", f"videos/v{v}.mp4", 25, 8, "question", ["green", "red"], 0,
+                      [Interval(2 + 2 * q, 7, "green")], {"scene_index": v, "family": "toy"})
+               for v in range(n_videos) for q in range(per_video)]
+    save_jsonl(records, data / "toy.jsonl")
+    return data, records
+
+
+def _toy_cache(model, tiny, data, records, tmp_path):
+    from lora.vision_cache import VisionCache, build_vision_cache
+    cache = VisionCache.for_model(tmp_path / "cache", model, frame_size=(28, 28), frame_stride=1)
+    added = build_vision_cache(model, tiny, records, cache, data_root=data, frame_size=(28, 28), frame_stride=1,
+                               device="cpu", num_workers=0)
+    assert added == len({r.video for r in records})
+    assert build_vision_cache(model, tiny, records, cache, data_root=data, frame_size=(28, 28), frame_stride=1,
+                              device="cpu", num_workers=0) == 0  # nothing left to encode
+    return cache
+
+
+def test_cached_vision_training_equals_encoding_the_pixels(builder, tiny_base, tmp_path):
+    """The cached encoder output, cut to the prefix, gives the same inputs and the same loss as the pixels."""
+    from dataclasses import replace
+    from lora.lora import ClevrerLoRASFTDataset, masked_sft_loss
+
+    data, records = _toy_videos(tmp_path)
+    tiny, model = _RemapBuilder(builder.processor), _tiny_model(tiny_base, lora=False).eval()
+    cache = _toy_cache(model, tiny, data, records, tmp_path)
+    split = ClevrerLoRASplitConfig(train="toy.jsonl", train_videos=2, train_frame_size=(28, 28), num_workers=0)
+    plain = ClevrerLoRASFTDataset(data / "toy.jsonl", data_root=data, builder=tiny, split=split, seed=3)
+    cached = ClevrerLoRASFTDataset(data / "toy.jsonl", data_root=data, builder=tiny,
+                                   split=replace(split, vision_cache=str(cache.path)), seed=3)
+    shorter = 0
+    for epoch in (1, 2):
+        plain.set_epoch(epoch)
+        cached.set_epoch(epoch)
+        for index in range(len(records)):
+            a, b = plain[index], cached[index]
+            assert "pixel_values_videos" in a and "video_embeds" in b
+            for key in ("input_ids", "labels", "mm_token_type_ids", "video_grid_thw", "second_per_grid_ts"):
+                torch.testing.assert_close(b[key], a[key])
+            shorter += int(b["video_grid_thw"][0, 0]) < 4
+            with torch.no_grad():
+                torch.testing.assert_close(masked_sft_loss(model, collate_sft([b], pad_id=1)),
+                                           masked_sft_loss(model, collate_sft([a], pad_id=1)), rtol=1e-4, atol=1e-4)
+    assert shorter  # some prefixes end before the last patch: the cached tokens were cut, not taken whole
+
+
+def test_cached_vision_validation_equals_encoding_the_pixels(builder, tiny_base, tmp_path):
+    from dataclasses import replace
+    from lora.lora import ClevrerLoRAValidationProvider, evaluate_choice_examples
+
+    data, records = _toy_videos(tmp_path)
+    tiny, model = _RemapBuilder(builder.processor), _tiny_model(tiny_base, lora=False).eval()
+    cache = _toy_cache(model, tiny, data, records, tmp_path)
+    split = ClevrerLoRASplitConfig(num_workers=0)
+    results = [evaluate_choice_examples(model, list(ClevrerLoRAValidationProvider(
+        records, data_root=data, builder=tiny, split=s).iter_choice_examples((28, 28))), resolution=(28, 28),
+        device="cpu") for s in (split, replace(split, vision_cache=str(cache.path)))]
+    for plain, cached in zip(*(r["predictions"] for r in results)):
+        for point in plain["predictions"]:
+            torch.testing.assert_close(torch.tensor(cached["predictions"][point]["scores"]),
+                                       torch.tensor(plain["predictions"][point]["scores"]), rtol=1e-4, atol=1e-4)
+
+
+def test_length_grouped_batches_cover_every_example_once_with_similar_lengths():
+    from lora.lora import _LengthGroupedBatches
+
+    class Prefixes:
+        def __init__(self):
+            self.n = 103
+
+        def __len__(self):
+            return self.n
+
+        def prefix_patches(self, epoch):
+            rng = np.random.default_rng(epoch)
+            return rng.integers(10, 65, self.n).tolist()
+
+    import numpy as np
+    dataset = Prefixes()
+    sampler = _LengthGroupedBatches(dataset, batch_size=2, seed=0, window=8)
+    sampler.set_epoch(1)
+    batches = list(sampler)
+    assert len(batches) == len(sampler)
+    assert sorted(i for batch in batches for i in batch) == list(range(dataset.n))
+    assert all(len(batch) <= 2 for batch in batches)
+    lengths = dataset.prefix_patches(1)
+    grouped = np.mean([abs(lengths[a] - lengths[b]) for a, b in (b for b in batches if len(b) == 2)])
+    random_pairs = np.mean([abs(lengths[i] - lengths[i + 1]) for i in range(0, dataset.n - 1, 2)])
+    assert grouped < random_pairs / 3  # neighbours in length share a batch
+    assert list(sampler) == batches  # the same epoch gives the same batches
+    sampler.set_epoch(2)
+    assert list(sampler) != batches
 
 
 def test_validation_decodes_each_video_once_in_workers(builder, tiny_base, tmp_path):

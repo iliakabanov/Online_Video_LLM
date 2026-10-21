@@ -15,6 +15,7 @@ import torch
 
 import _paths  # noqa: F401  (src/ on the path)
 from lora import TIME_POINTS, clevrer_lora_test_provider, evaluate_validation, load_lora_adapter
+from lora.vision_cache import VisionCache, build_vision_cache
 from online_vllm.data.inputs import InputBuilder
 from online_vllm.models import ModelConfig, build_model
 
@@ -42,6 +43,12 @@ def main() -> None:
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     provider, split = clevrer_lora_test_provider(run, data_root=args.data_root, builder=builder)
     width, height = split.train_frame_size
+    if split.vision_cache is not None:  # the run's cache: checked against this model, completed if videos are missing
+        cache = VisionCache.for_model(split.vision_cache, model, frame_size=split.train_frame_size,
+                                      frame_stride=split.frame_stride)
+        build_vision_cache(model, builder, provider.records, cache, data_root=args.data_root,
+                           frame_size=split.train_frame_size, frame_stride=split.frame_stride, device=args.device,
+                           num_workers=split.num_workers)
     result = evaluate_validation(model, provider, resolutions=((width, height),), device=args.device,
                                  desc=f"Test, adapter {args.adapter}")[f"{width}x{height}"]
     predictions = result.pop("predictions")

@@ -32,6 +32,8 @@ from online_vllm.models.config import ModelConfig
 from online_vllm.models.model import attention_kernels
 from online_vllm.train.features import Layout, layout
 
+from .vision_cache import VisionCache, embed_cached_video
+
 
 # Validation prefixes: the first patch only; up to the target patch; up to a patch drawn uniformly from the target to
 # the end (fixed per question, like a training prefix); the whole video.
@@ -39,7 +41,9 @@ TIME_POINTS = ("start", "target", "answerable", "end")
 VALIDATION_PREFIX_SEED = 0
 # Fixed, unlike the training seed: every run is selected on the same validation half and tested on the same test half.
 VALIDATION_SPLIT_SEED = 0
-VIDEO_KEYS = ("pixel_values_videos", "video_grid_thw", "second_per_grid_ts")
+VIDEO_KEYS = ("video_grid_thw", "second_per_grid_ts")
+# The video itself: pixels for the vision encoder, or its cached output (lora/vision_cache.py).
+VIDEO_CONTENT_KEYS = ("pixel_values_videos", "video_embeds")
 TOKEN_KEYS = ("input_ids", "attention_mask", "mm_token_type_ids", "labels")
 ANSWER_IDS_KEY = "answer_ids"
 EXPECTED_LORA_LEAVES = frozenset(("q_proj", "k_proj", "v_proj", "o_proj"))
@@ -56,10 +60,13 @@ class LoRASFTConfig:
     weight_decay: float = 0.01
     betas: tuple[float, float] = (0.9, 0.95)
     grad_clip: float = 1.0
-    batch_size: int = 4  # right-padded sequences per forward pass
-    gradient_accumulation: int = 1
+    # 2 sequences per forward pass x 2 accumulated = the same optimizer steps as batches of 4: one supervised token per
+    # example, so the mean of two micro-batch means is the mean over 4. Without checkpointing the step is ~4x faster
+    # (it recomputed the forward at great cost) and peaks at ~43 GB on an A100 80 GB; batches of 4 would not fit.
+    batch_size: int = 2  # right-padded sequences per forward pass
+    gradient_accumulation: int = 2
     epochs: int = 3
-    gradient_checkpointing: bool = True
+    gradient_checkpointing: bool = False
     seed: int = 0
     overwrite: bool = False
 
@@ -92,6 +99,8 @@ class ClevrerLoRASplitConfig:
     speak_delay: int = 0
     train_frame_size: tuple[int, int] = (252, 168)  # width, height
     num_workers: int = 2
+    # Directory of a VisionCache (lora/vision_cache.py) holding every video used, or None to decode and encode videos.
+    vision_cache: str | None = None
 
     def validate(self) -> None:
         if self.train_videos < 1 or self.validation_videos < 1:
@@ -173,11 +182,16 @@ def _prefix_context(record: Record, *, data_root: Path, builder: InputBuilder, f
 
 
 def _build_sft_example(builder: InputBuilder, record: Record, frames: Any, *, fps: float) -> dict[str, Any]:
-    """Use the existing Qwen processor/chat template and append the answer letter as the only supervised token.
+    """Use the existing Qwen processor/chat template and append the answer letter as the only supervised token."""
+    return _append_answer(builder, record, builder._encode(format_prompt(record.question, record.choices), frames, fps))
+
+
+def _append_answer(builder: InputBuilder, record: Record, inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Append the answer letter to prompt/video inputs as the only supervised token.
 
     No EOS follows the letter: the answer is read as log P(letter) at the assistant position (as probe_logprob in the
     cached features), so the loss is exactly -log P(correct letter) and nothing else shares its weight."""
-    inputs = builder._encode(format_prompt(record.question, record.choices), frames, fps)
+    inputs = dict(inputs)
     ids = inputs["input_ids"]
     tokenizer = builder.processor.tokenizer
     answer = answer_letter(record.choices, record.answers[0].answer)
@@ -188,7 +202,11 @@ def _build_sft_example(builder: InputBuilder, record: Record, frames: Any, *, fp
     inputs["mm_token_type_ids"] = torch.cat((inputs["mm_token_type_ids"], torch.zeros_like(answer_ids)[None]), dim=1)
     inputs["labels"] = torch.cat((torch.full_like(ids, IGNORE), answer_ids[None]), dim=1)
     inputs[ANSWER_IDS_KEY] = answer_ids
-    return dict(inputs)
+    return inputs
+
+
+def _open_cache(split: ClevrerLoRASplitConfig) -> VisionCache | None:
+    return None if split.vision_cache is None else VisionCache(split.vision_cache)
 
 
 class ClevrerLoRASFTDataset(torch.utils.data.Dataset):
@@ -198,6 +216,7 @@ class ClevrerLoRASFTDataset(torch.utils.data.Dataset):
                  seed: int):
         self.records = _records_for_first_videos(path, split.train_videos)
         self.data_root, self.builder, self.split, self.seed, self.epoch = Path(data_root), builder, split, seed, 0
+        self.cache = _open_cache(split)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -205,14 +224,62 @@ class ClevrerLoRASFTDataset(torch.utils.data.Dataset):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
+    def _prefix_end(self, record: Record, patches: int, epoch: int) -> int:
+        target = _target_patch(record, builder=self.builder, frame_stride=self.split.frame_stride,
+                               speak_delay=self.split.speak_delay, patches=patches)
+        return sample_prefix(target, patches, seed=self.seed, epoch=epoch, example_key=record.id).last_patch
+
+    def prefix_patches(self, epoch: int) -> list[int]:
+        """Temporal patches of every example's prefix in this epoch, from the record alone (no video): the length
+        that _LengthGroupedBatches sorts by. A video of num_frames frames sampled every frame_stride-th frame."""
+        temporal = self.builder.temporal_patch
+        result = []
+        for record in self.records:
+            patches = -(-record.num_frames // self.split.frame_stride) // temporal
+            result.append(self._prefix_end(record, patches, epoch) + 1)
+        return result
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
-        frames, target, patches = _prefix_context(
-            record, data_root=self.data_root, builder=self.builder, frame_stride=self.split.frame_stride,
-            speak_delay=self.split.speak_delay, frame_size=self.split.train_frame_size)
-        selection = sample_prefix(target, patches, seed=self.seed, epoch=self.epoch, example_key=record.id)
-        count = (selection.last_patch + 1) * self.builder.temporal_patch
+        if self.cache is not None:
+            entry = self.cache.load(record.video)
+            last = self._prefix_end(record, VisionCache.patches(entry), self.epoch)
+            prompt = format_prompt(record.question, record.choices)
+            return _append_answer(self.builder, record, VisionCache.encode(self.builder, prompt, entry, last + 1))
+        frames, patches = _decode(record, data_root=self.data_root, builder=self.builder,
+                                  frame_stride=self.split.frame_stride, frame_size=self.split.train_frame_size)
+        count = (self._prefix_end(record, patches, self.epoch) + 1) * self.builder.temporal_patch
         return _build_sft_example(self.builder, record, frames[:count], fps=record.fps / self.split.frame_stride)
+
+
+class _LengthGroupedBatches(torch.utils.data.Sampler):
+    """Micro-batches of examples whose prefixes have similar length, so that right padding hardly adds tokens.
+
+    Every epoch: shuffle, cut into windows of ``window`` micro-batches, sort each window by this epoch's prefix
+    length, cut it into micro-batches, and shuffle the micro-batches. Batches stay random across the data; only
+    neighbours in length share one."""
+
+    def __init__(self, dataset: ClevrerLoRASFTDataset, batch_size: int, seed: int, window: int = 64):
+        self.dataset, self.batch_size, self.seed, self.window, self.epoch = dataset, batch_size, seed, window, 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        n, size = len(self.dataset), self.batch_size * self.window
+        return sum(-(-min(size, n - start) // self.batch_size) for start in range(0, n, size))
+
+    def __iter__(self):
+        lengths = self.dataset.prefix_patches(self.epoch)
+        rng = random.Random(_stable_seed(self.seed, self.epoch, "length_grouped_batches"))
+        order = list(range(len(lengths)))
+        rng.shuffle(order)
+        size, batches = self.batch_size * self.window, []
+        for start in range(0, len(order), size):
+            window = sorted(order[start:start + size], key=lengths.__getitem__)
+            batches += [window[i:i + self.batch_size] for i in range(0, len(window), self.batch_size)]
+        rng.shuffle(batches)
+        return iter(batches)
 
 
 def _require_sft_model_config(config: ModelConfig) -> None:
@@ -290,6 +357,8 @@ def _validate_example(example: Mapping[str, Any]) -> None:
     missing = set(TOKEN_KEYS + VIDEO_KEYS + (ANSWER_IDS_KEY,)) - set(example)
     if missing:
         raise KeyError(f"Prepared SFT example is missing keys: {sorted(missing)}")
+    if sum(key in example for key in VIDEO_CONTENT_KEYS) != 1:
+        raise KeyError(f"Prepared SFT example needs exactly one of {VIDEO_CONTENT_KEYS}")
     for key in TOKEN_KEYS:
         value = example[key]
         if not torch.is_tensor(value) or value.ndim != 2 or value.shape[0] != 1:
@@ -362,7 +431,7 @@ def collate_sft(examples: Sequence[Mapping[str, Any]], pad_id: int) -> dict[str,
         "mm_token_type_ids": pad("mm_token_type_ids", 0),
         "labels": pad("labels", IGNORE),
         ANSWER_IDS_KEY: [example[ANSWER_IDS_KEY].clone() for example in examples],
-        "pixel_values_videos": torch.cat([example["pixel_values_videos"] for example in examples]),
+        **{key: torch.cat([example[key] for example in examples]) for key in VIDEO_CONTENT_KEYS if key in examples[0]},
         "video_grid_thw": torch.cat([example["video_grid_thw"] for example in examples]),
         "second_per_grid_ts": torch.cat([torch.as_tensor(example["second_per_grid_ts"]) for example in examples]),
     }
@@ -382,7 +451,12 @@ def masked_sft_loss(model: torch.nn.Module, batch: Mapping[str, Any]) -> torch.T
     predicting = torch.zeros_like(supervised)
     predicting[:, :-1] = supervised[:, 1:]
     # Both masks flatten in batch-then-position order, so features and targets stay paired.
-    hidden = model.decision_features(inputs, predicting)
+    if "video_embeds" in inputs:
+        kwargs, _ = embed_cached_video(model, inputs)
+        with attention_kernels():
+            hidden = model.qwen.model(**kwargs, use_cache=False, return_dict=True).last_hidden_state[predicting]
+    else:
+        hidden = model.decision_features(inputs, predicting)
     logits = model.qwen.lm_head(hidden).float()
     loss = torch.nn.functional.cross_entropy(logits, labels[supervised])
     if not torch.isfinite(loss):
@@ -437,12 +511,15 @@ class ClevrerLoRAValidationProvider:
                  split: ClevrerLoRASplitConfig):
         self.records = list(records)
         self.data_root, self.builder, self.split = Path(data_root), builder, split
+        self.cache = _open_cache(split)
 
     def iter_choice_examples(self, resolution: tuple[int, int]) -> Iterable[ChoiceEvaluationExample]:
-        """The questions video by video. DataLoader workers decode and encode the next videos while the model
-        evaluates the current one."""
+        """The questions video by video. DataLoader workers prepare the next videos (load them from the vision cache,
+        or decode and encode them) while the model evaluates the current one."""
         if len(resolution) != 2 or any(side <= 0 or side % 28 for side in resolution):
             raise ValueError("evaluation resolution must be [width, height], multiples of 28")
+        if self.cache is not None and list(resolution) != list(self.cache.settings["frame_size"]):
+            raise ValueError(f"The vision cache holds {self.cache.settings['frame_size']} frames, not {resolution}")
         by_video: dict[str, list[Record]] = {}
         for record in self.records:
             by_video.setdefault(record.video, []).append(record)
@@ -452,10 +529,15 @@ class ClevrerLoRAValidationProvider:
             yield from examples
 
     def video_examples(self, records: Sequence[Record], resolution: tuple[int, int]) -> list[ChoiceEvaluationExample]:
-        """All questions of one video: the video is decoded once, and its pixel tensor is shared by the questions."""
+        """All questions of one video: the video is loaded (or decoded) once, and its tensor is shared by the
+        questions."""
         tokenizer = self.builder.processor.tokenizer
-        frames, patches = _decode(records[0], data_root=self.data_root, builder=self.builder,
-                                  frame_stride=self.split.frame_stride, frame_size=resolution)
+        if self.cache is not None:
+            entry = self.cache.load(records[0].video)
+            patches = VisionCache.patches(entry)
+        else:
+            frames, patches = _decode(records[0], data_root=self.data_root, builder=self.builder,
+                                      frame_stride=self.split.frame_stride, frame_size=resolution)
         examples, video = [], None
         for record in records:
             target = _target_patch(record, builder=self.builder, frame_stride=self.split.frame_stride,
@@ -466,15 +548,20 @@ class ClevrerLoRAValidationProvider:
             answerable = sample_prefix(target, patches, seed=VALIDATION_PREFIX_SEED, epoch=0,
                                        example_key=record.id).last_patch
             prompt = format_prompt(record.question, record.choices)
-            inputs = dict(self.builder._encode(prompt, frames, record.fps / self.split.frame_stride))
+            if self.cache is not None:
+                inputs = VisionCache.encode(self.builder, prompt, entry)
+            else:
+                inputs = dict(self.builder._encode(prompt, frames, record.fps / self.split.frame_stride))
             lay = layout(inputs, prompt, tokenizer)
             if lay.num_pairs != patches:
                 raise ValueError(f"{record.id}: {lay.num_pairs} pairs in the input, {patches} decoded")
-            # Same frames, same pixels: one tensor for all questions (~65 MB at 252x168), sent from a worker once.
+            # Same video, same tensor for all questions (~65 MB of pixels at 252x168), sent from a worker once.
             if video is None:
                 video = inputs
             elif torch.equal(inputs["video_grid_thw"], video["video_grid_thw"]):
-                inputs["pixel_values_videos"] = video["pixel_values_videos"]
+                for key in VIDEO_CONTENT_KEYS:
+                    if key in inputs:
+                        inputs[key] = video[key]
             examples.append(ChoiceEvaluationExample(
                 record_id=record.id, answer_index=record.choices.index(record.answers[0].answer),
                 letter_ids=torch.tensor([ids[0] for ids in letters]), inputs=inputs, layout=lay,
@@ -513,10 +600,16 @@ def build_clevrer_lora_data(*, data_root: str | Path, builder: InputBuilder, spl
         _records_for_first_videos(root / split.validation, split.validation_videos), VALIDATION_SPLIT_SEED)
     validation = ClevrerLoRAValidationProvider(validation_records, data_root=root, builder=builder, split=split)
     loader = DataLoader(
-        train, batch_size=batch_size, shuffle=True, num_workers=split.num_workers,
-        collate_fn=partial(collate_sft, pad_id=builder.processor.tokenizer.pad_token_id),
-        generator=torch.Generator().manual_seed(seed), persistent_workers=False)
+        train, batch_sampler=_LengthGroupedBatches(train, batch_size, seed), num_workers=split.num_workers,
+        collate_fn=partial(collate_sft, pad_id=builder.processor.tokenizer.pad_token_id), persistent_workers=False)
     return loader, validation, {"data": asdict(split), **info}
+
+
+def lora_records(split: ClevrerLoRASplitConfig, data_root: str | Path) -> list[Record]:
+    """Every question whose video LoRA uses: the training videos and all LoRA validation videos (both halves)."""
+    root = Path(data_root)
+    return (_records_for_first_videos(root / split.train, split.train_videos)
+            + _records_for_first_videos(root / split.validation, split.validation_videos))
 
 
 def clevrer_lora_test_provider(run_dir: str | Path, *, data_root: str | Path,
@@ -554,15 +647,20 @@ def probe_letter_logprobs(model: torch.nn.Module, inputs: Mapping[str, Any], lay
     """
     qwen = model.qwen.model
     inputs = {key: inputs[key].to(device) for key in
-              ("input_ids", "mm_token_type_ids", "pixel_values_videos", "video_grid_thw", "second_per_grid_ts")}
+              ("input_ids", "mm_token_type_ids", "video_grid_thw", "second_per_grid_ts") + VIDEO_CONTENT_KEYS
+              if key in inputs}
     if inputs["input_ids"].shape[0] != 1:
         raise ValueError("Probing takes one question at a time")
-    positions, _ = qwen.get_rope_index(
-        inputs["input_ids"], inputs["mm_token_type_ids"], video_grid_thw=inputs["video_grid_thw"],
-        second_per_grid_ts=inputs["second_per_grid_ts"], attention_mask=torch.ones_like(inputs["input_ids"]))
-    qwen.rope_deltas = None
+    if "video_embeds" in inputs:
+        main, positions = embed_cached_video(model, inputs)
+    else:
+        positions, _ = qwen.get_rope_index(
+            inputs["input_ids"], inputs["mm_token_type_ids"], video_grid_thw=inputs["video_grid_thw"],
+            second_per_grid_ts=inputs["second_per_grid_ts"], attention_mask=torch.ones_like(inputs["input_ids"]))
+        qwen.rope_deltas = None
+        main = {**inputs, "position_ids": positions}
     with attention_kernels():
-        out = qwen(**inputs, position_ids=positions, use_cache=True, return_dict=True)
+        out = qwen(**main, use_cache=True, return_dict=True)
     length, t = inputs["input_ids"].shape[1], len(lay.tail)
     decisions = lay.decisions(device)[torch.as_tensor(list(pairs), device=device)]          # last token of each pair
     probe_of = torch.arange(len(decisions), device=device).repeat_interleave(t)
@@ -662,10 +760,11 @@ def load_lora_adapter(model: torch.nn.Module, path: str | Path) -> torch.nn.Modu
 
 
 def _set_epoch(loader: DataLoader, epoch: int) -> None:
-    dataset = loader.dataset
-    setter = getattr(dataset, "set_epoch", None)
-    if setter is not None:
-        setter(epoch)
+    """The dataset draws the prefixes of the epoch, the batch sampler groups them by length: both must know it."""
+    for part in (loader.dataset, getattr(loader, "batch_sampler", None)):
+        setter = getattr(part, "set_epoch", None)
+        if setter is not None:
+            setter(epoch)
 
 
 def _prepare_output_dir(path: str | Path, *, overwrite: bool) -> Path:

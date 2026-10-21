@@ -4,7 +4,7 @@ Runs a few training steps without updating the weights, on the same data, model 
 and prints one line per batch and the mean without the first (warm-up) batch. The vision encoder is timed by an
 extra forward of its own; the loss forward includes it as well.
 
-python scripts/profile_lora_sft.py --local-files-only [--batches 6] [--num-workers 2] [--no-checkpointing]
+python scripts/profile_lora_sft.py --local-files-only [--batches 6] [--num-workers 2] [--gradient-checkpointing]
 """
 import argparse
 import importlib.util
@@ -13,15 +13,20 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-import torch
-import transformers
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # as train_lora_sft.py
 
-import _paths  # noqa: F401  (src/ on the path)
-from lora import ClevrerLoRASplitConfig, LoRASFTConfig, build_clevrer_lora_data, masked_sft_loss, prepare_lora_sft_model
-from lora.lora import _move_inputs
-from online_vllm.data.inputs import InputBuilder
-from online_vllm.models import ModelConfig, build_model
-from online_vllm.models.model import attention_kernels
+import torch  # noqa: E402
+import transformers  # noqa: E402
+
+import _paths  # noqa: F401,E402  (src/ on the path)
+from lora import (  # noqa: E402
+    ClevrerLoRASplitConfig, LoRASFTConfig, build_clevrer_lora_data, masked_sft_loss, prepare_lora_sft_model,
+)
+from lora.lora import _move_inputs, lora_records  # noqa: E402
+from lora.vision_cache import VisionCache, build_vision_cache  # noqa: E402
+from online_vllm.data.inputs import InputBuilder  # noqa: E402
+from online_vllm.models import ModelConfig, build_model  # noqa: E402
+from online_vllm.models.model import attention_kernels  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -34,17 +39,26 @@ def main() -> None:
     parser.add_argument("--batches", type=int, default=6)
     parser.add_argument("--batch-size", type=int, default=LoRASFTConfig.batch_size)
     parser.add_argument("--num-workers", type=int, default=ClevrerLoRASplitConfig.num_workers)
-    parser.add_argument("--no-checkpointing", action="store_true")
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction,
+                        default=LoRASFTConfig.gradient_checkpointing)
+    parser.add_argument("--vision-cache", help="time with a vision-encoder cache in this directory (filled as needed)")
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
 
-    sft = replace(LoRASFTConfig(), batch_size=args.batch_size, gradient_checkpointing=not args.no_checkpointing)
+    sft = replace(LoRASFTConfig(), batch_size=args.batch_size, gradient_checkpointing=args.gradient_checkpointing)
     torch.manual_seed(sft.seed)
     model = build_model(ModelConfig.load(args.model), local_files_only=args.local_files_only, device=args.device)
     model = prepare_lora_sft_model(model, model.config, gradient_checkpointing=sft.gradient_checkpointing)
     model.train()
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
-    split = ClevrerLoRASplitConfig(train_videos=50, validation_videos=2, num_workers=args.num_workers)
+    split = ClevrerLoRASplitConfig(train_videos=50, validation_videos=2, num_workers=args.num_workers,
+                                   vision_cache=args.vision_cache)
+    if args.vision_cache:
+        cache = VisionCache.for_model(args.vision_cache, model, frame_size=split.train_frame_size,
+                                      frame_stride=split.frame_stride)
+        build_vision_cache(model, builder, lora_records(split, args.data_root), cache, data_root=args.data_root,
+                           frame_size=split.train_frame_size, frame_stride=split.frame_stride, device=args.device,
+                           num_workers=args.num_workers)
     loader, _, _ = build_clevrer_lora_data(data_root=args.data_root, builder=builder, split=split, seed=sft.seed,
                                            batch_size=sft.batch_size)
     qwen = model.qwen.model
@@ -66,8 +80,11 @@ def main() -> None:
         batch = next(iterator)
         wait = time.perf_counter() - started
         moved = _move_inputs(batch, args.device)
-        with torch.no_grad(), attention_kernels():
-            _, vision = timed(lambda: qwen.get_video_features(moved["pixel_values_videos"], moved["video_grid_thw"]))
+        vision = 0.0  # with the cache the encoder does not run at all
+        if "pixel_values_videos" in moved:
+            with torch.no_grad(), attention_kernels():
+                _, vision = timed(lambda: qwen.get_video_features(moved["pixel_values_videos"],
+                                                                  moved["video_grid_thw"]))
         torch.cuda.reset_peak_memory_stats()
         loss, forward = timed(lambda: masked_sft_loss(model, moved))
 

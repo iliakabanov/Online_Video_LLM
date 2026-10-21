@@ -61,19 +61,32 @@ class InputBuilder:
         factor = vp.patch_size * vp.merge_size
         if frames.shape[1] % factor or frames.shape[2] % factor:
             raise ValueError(f"Frame height and width must be multiples of {factor}, got {frames.shape[1:3]}")
-        messages = [{"role": "user", "content": [
-            {"type": "text", "text": prompt}, {"type": "video"},
-        ]}]
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
         n = len(frames)
         return self.processor(
-            text=[text], videos=[frames], return_tensors="pt",
+            text=[self._chat_text(prompt)], videos=[frames], return_tensors="pt",
             do_sample_frames=False, do_resize=False,
             video_metadata=[{"total_num_frames": n, "fps": fps,
                              "frames_indices": list(range(n))}],
         )
+
+    def _chat_text(self, prompt: str) -> str:
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": prompt}, {"type": "video"},
+        ]}]
+        return self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    def _encode_tokens(self, prompt: str, video_grid_thw: torch.Tensor, second_per_grid_ts: torch.Tensor):
+        """What _encode gives for a video of this grid, without its pixels: the same text, tokens and token types, for
+        inputs whose visual tokens come from cached vision-encoder outputs. The video placeholder is expanded to as
+        many tokens as the processor would, and the text goes through the same processor call."""
+        grid = torch.as_tensor(video_grid_thw).reshape(1, 3)
+        count = int(grid[0].prod()) // self.processor.video_processor.merge_size ** 2
+        token = self.processor.video_token
+        text = self._chat_text(prompt).replace(token, "<|placeholder|>" * count, 1).replace("<|placeholder|>", token)
+        inputs = self.processor(text=[text], return_tensors="pt")
+        inputs["video_grid_thw"] = grid.clone()
+        inputs["second_per_grid_ts"] = torch.as_tensor(second_per_grid_ts).reshape(1).clone()
+        return inputs
 
     def build_observation(self, question: str, video: VideoPrefix, t: float):
         # Crop before visual encoding: no temporal patch can contain a future frame.
