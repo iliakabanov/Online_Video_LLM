@@ -262,20 +262,20 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwe
 
 В `configs/model/qwen_3b_head.yaml` — `quantization: null` (bf16).
 
-На Drive каждый сплит ложится в `<папка>/<имя каталога признаков>/<сплит>`, например `group1_s1_252x168/train/shard_00000`.
+На Drive каждый сплит ложится в `<папка>/<имя каталога признаков>/<сплит>`, например `group1_half_s1_252x168/train/shard_00000`.
 
 ### 6. Пробный прогон без выгрузки
 
 ```bash
-python scripts/extract_features.py --split train --device cuda --limit 20 --no-upload --local-files-only
+python scripts/extract_features.py --split train --device cuda --videos 3 --no-upload --local-files-only
 ```
 
-Пишет в `data/features/group1_s1_252x168/train_first20`. Записать скорость из прогресс-бара (вопросов в секунду) и пик памяти (`nvidia-smi` в соседнем окне). Чтобы подобрать `batch_size`, повторить с разными значениями в конфиге (каталог `train_first20` перед этим удалить): брать наибольшее, после которого скорость перестаёт расти, с запасом по памяти. Проверить результат:
+`--videos N` берёт первые N видео файла со всеми их вопросами (~6,5 на видео). Пишет в `data/features/group1_half_s1_252x168/train_videos3`. Записать скорость из прогресс-бара (вопросов в секунду) и пик памяти (`nvidia-smi` в соседнем окне). Чтобы подобрать `batch_size`, повторить с разными значениями в конфиге (каталог `train_videos3` перед этим удалить): брать наибольшее, после которого скорость перестаёт расти, с запасом по памяти. Проверить результат:
 
 ```python
 import numpy as np
 from online_vllm.train.features import FeatureSet   # из корня репозитория: PYTHONPATH=src python
-fs = FeatureSet("data/features/group1_s1_252x168/train_first20")
+fs = FeatureSet("data/features/group1_half_s1_252x168/train_videos3")
 print(fs.meta["records"], fs.meta["videos"], len(fs.shards), "shards")
 for name in fs.meta["shapes"]:
     a = np.concatenate([np.asarray(fs.video(i) if name == "vis_mean" else fs.question(name, i), np.float32)
@@ -291,28 +291,30 @@ print("attention shares sum to 1:", np.allclose(att.sum(-1), 1, atol=2e-3))
 Та же команда без `--no-upload` не пересчитывает признаки (всё уже посчитано), а выгружает готовые шарды:
 
 ```bash
-python scripts/extract_features.py --split train --device cuda --limit 20 --local-files-only
-rclone ls gdrive:group1_s1_252x168/train_first20 --drive-root-folder-id $ID   # meta.json, done, shard_00000/…
-ls data/features/group1_s1_252x168/train_first20                             # шарда локально уже нет
-cat data/features/group1_s1_252x168/train_first20/uploaded.txt                # shard_00000
+python scripts/extract_features.py --split train --device cuda --videos 3 --local-files-only
+rclone ls gdrive:group1_half_s1_252x168/train_videos3 --drive-root-folder-id $ID   # meta.json, done, shard_00000/…
+ls data/features/group1_half_s1_252x168/train_videos3                             # шарда локально уже нет
+cat data/features/group1_half_s1_252x168/train_videos3/uploaded.txt                # shard_00000
 ```
 
-Пробную копию на Drive потом можно удалить: `rclone purge gdrive:group1_s1_252x168/train_first20 --drive-root-folder-id $ID`.
+Пробную копию на Drive потом можно удалить: `rclone purge gdrive:group1_half_s1_252x168/train_videos3 --drive-root-folder-id $ID`.
 
 ### 8. Пилот
 
 Запускать в `tmux`, чтобы обрыв SSH не остановил процесс (`tmux new -s features`, вернуться — `tmux attach -t features`):
 
 ```bash
-python scripts/extract_features.py --split train --device cuda --limit 2000 --local-files-only   # -> train_first2000
-python scripts/extract_features.py --split eval --device cuda --limit 1000 --local-files-only    # -> val_first1000
+python scripts/extract_features.py --split train --device cuda --videos 300 --local-files-only   # -> train_videos300
+python scripts/extract_features.py --split eval --device cuda --videos 150 --local-files-only    # -> val_videos150
 ```
 
-`--limit N` берёт первые N вопросов файла (~N / 6,6 видео подряд), а не случайную выборку. Результат окажется на Drive в `group1_s1_252x168/train_first2000` и `…/val_first1000`. По пилоту выбираются признаки для полного извлечения (раздел «Порядок работы»).
+`--videos N` берёт первые N видео файла подряд (в порядке `scene_index`) со всеми их вопросами, а не случайную выборку: 300 видео — около 2000 вопросов. Результат окажется на Drive в `group1_half_s1_252x168/train_videos300` и `…/val_videos150`. По пилоту выбираются признаки для полного извлечения (раздел «Порядок работы»).
+
+**Признаки дообученной модели.** С `--adapter <запуск LoRA>/best` (адаптер `scripts/train_lora_sft.py`) модель собирается из `model.yaml` запуска, в неё загружается адаптер, каталог получает суффикс `_<запуск>_<адаптер>` (например `train_lora_1000_best_videos300`), а `meta.json` — описание адаптера с хешем весов. Для сравнения с исходной моделью — те же `--videos`: вопросы будут одни и те же.
 
 ### 9. Полное извлечение
 
-После выбора признаков поправить `lm_layers`, `vis_layers` и т. п. в конфиге и запустить без `--limit`:
+После выбора признаков поправить `lm_layers`, `vis_layers` и т. п. в конфиге и запустить без `--videos`:
 
 ```bash
 python scripts/extract_features.py --split train --device cuda --local-files-only
@@ -327,9 +329,9 @@ python scripts/extract_features.py --split eval --device cuda --local-files-only
 |---|---|
 | ход и оставшееся время | прогресс-бар: вопросы, скорость, ETA; `saved` — сколько вопросов записано на диск |
 | GPU | `nvidia-smi` |
-| выгрузка | `tail -f data/features/group1_s1_252x168/train/upload.log`, готовые шарды — в `uploaded.txt` |
+| выгрузка | `tail -f data/features/group1_half_s1_252x168/train/upload.log`, готовые шарды — в `uploaded.txt` |
 | место на сервере | `df -h`: признаков локально не больше двух шардов (~40 ГБ) |
-| что уже на Drive | `rclone size gdrive:group1_s1_252x168/train --drive-root-folder-id $ID` |
+| что уже на Drive | `rclone size gdrive:group1_half_s1_252x168/train --drive-root-folder-id $ID` |
 
 ### 11. Если что-то пошло не так
 
@@ -351,4 +353,4 @@ python scripts/sync_features.py download --split train eval   # шарды с Dr
 python scripts/train_head.py --output outputs/group1_head --device cuda
 ```
 
-Для признаков пилота в `features.train` / `features.eval` конфига должны стоять `…/train_first2000` и `…/val_first1000`. Удобнее держать для пилота отдельную копию конфига и передавать её через `--train`.
+Для признаков пилота в `features.train` / `features.eval` конфига должны стоять `…/train_videos300` и `…/val_videos150` (для дообученной модели — `…/train_lora_1000_best_videos300` и т. п.). Удобнее держать для пилота отдельную копию конфига и передавать её через `--train`.

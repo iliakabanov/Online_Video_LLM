@@ -95,13 +95,16 @@ def train_head(model_config: ModelConfig, config: TrainConfig, data_root: Path, 
     seed_everything(config.seed)
     train_fs = FeatureSet(Path(data_root) / config.features.train)
     eval_fs = FeatureSet(Path(data_root) / config.features.eval)
-    backbone = ("model_id", "revision", "quantization")
+    backbone = ("model_id", "revision", "quantization", "adapter")
     for fs in (train_fs, eval_fs):
         fs.check(config.video)
-        if [fs.meta[k] for k in backbone] != [train_fs.meta[k] for k in backbone]:
+        if [fs.meta.get(k) for k in backbone] != [train_fs.meta.get(k) for k in backbone]:
             raise ValueError("Train and eval features come from different backbones")
     # The head will run on the backbone of its checkpoint: it must be the one that made the features.
     made, named = train_fs.meta, model_config.backbone
+    if made.get("adapter") is not None:
+        raise ValueError("Features of a LoRA fine-tuned model: its checkpoint would run on the base backbone; "
+                         "train the head with uhead.train")
     if (made["model_id"], made["quantization"]) != (named.model_id, named.quantization):
         raise ValueError(f"Features come from {made['model_id']} (quantization {made['quantization']}), the model "
                          f"config names {named.model_id} (quantization {named.quantization})")

@@ -380,8 +380,8 @@ python -m $M.viewer [--port 8000]                     # http://localhost:8000/cl
   во всех запусках с тем же m, чтобы их можно было сравнивать на одних и тех же validation и test. Половина
   validation выбирает чекпоинт во время обучения, половину test обучение не трогает: её оценивает
   `scripts/evaluate_lora_sft.py` по спискам видео из `split.json` запуска.
-- Признаки (`scripts/extract_features.py`, `configs/train/group1.yaml`) извлекаются из `*_features.jsonl`: `--limit N`
-  берёт первые N вопросов второй половины. Признаки с `val_group1_features.jsonl` делятся пополам по видео на
+- Признаки (`scripts/extract_features.py`, `configs/train/group1.yaml`) извлекаются из `*_features.jsonl`: `--videos N`
+  берёт первые N видео второй половины со всеми их вопросами. Признаки с `val_group1_features.jsonl` делятся пополам по видео на
   validation и test головы в `uhead.train` (`split.json`).
 - Признаки, извлечённые раньше (`group1_s1_252x168/train_first8000`, `val_first2000`), взяты с **первых** видео, то
   есть теперь из части LoRA. Для сравнения двух моделей признаки исходной Qwen нужно извлечь заново, из

@@ -223,8 +223,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     eval_fs = FeatureSet(Path(data_root) / train_config.features.eval)
     for fs in (train_fs, eval_fs):
         fs.check(train_config.video)
-    for key in ("model_id", "revision", "quantization", "temporal_patch"):
-        if train_fs.meta[key] != eval_fs.meta[key]:
+    for key in ("model_id", "revision", "quantization", "temporal_patch", "adapter"):
+        if train_fs.meta.get(key) != eval_fs.meta.get(key):  # adapter: только у признаков модели с LoRA
             raise ValueError(f"Train и eval features расходятся по {key}")
     train_items, train_dropped = labelled(train_fs, train_config, tags, step_window, sigmoid_slope, gaussian_sigma)
     eval_items, eval_dropped = labelled(eval_fs, train_config, tags, step_window, sigmoid_slope, gaussian_sigma)

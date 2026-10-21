@@ -442,12 +442,19 @@ class _Shard:
 
 
 def extract(model, builder: InputBuilder, records_path: Path, data_root: Path, video, spec, out: Path, device,
-            num_workers: int = 1, flush_every: int = 20, limit: int | None = None, uploader=None) -> Path:
+            num_workers: int = 1, flush_every: int = 20, videos: int | None = None, uploader=None,
+            adapter: dict | None = None) -> Path:
     """Write the features of every question of records_path to `out`, video by video, in shards of spec.shard_gb;
     resumes an interrupted run. With an uploader (train/remote.py) every closed shard is copied to Google Drive and
-    deleted locally, in the background while the next shard is computed."""
+    deleted locally, in the background while the next shard is computed. `videos`: only the questions of the first
+    videos of the file, in its order (every question of each). `adapter` describes the LoRA adapter loaded
+    into the model (its path, epoch and file hash) and goes into meta.json: features of a fine-tuned model never mix
+    with those of the base model or of another adapter."""
     out = Path(out)
-    records = list(load_jsonl(Path(records_path)))[:limit]
+    records = list(load_jsonl(Path(records_path)))
+    if videos is not None:
+        kept = set(list(dict.fromkeys(r.video for r in records))[:videos])
+        records = [r for r in records if r.video in kept]
     by_video = {}
     for i, r in enumerate(records):
         by_video.setdefault(r.video, []).append(i)
@@ -492,6 +499,8 @@ def extract(model, builder: InputBuilder, records_path: Path, data_root: Path, v
         "bytes": total * question_bytes + video_total * video_bytes,
         "shard_gb": spec.shard_gb, "shards": [[s[0], s[-1] + 1] for s in plan],  # [first video, end video)
     }
+    if adapter is not None:  # absent for the base model, so that its earlier extractions still resume
+        meta["adapter"] = adapter
     if (out / "meta.json").exists():
         if json.loads((out / "meta.json").read_text()) != meta:
             raise ValueError(f"{out} holds features of other settings; remove it or choose another directory")

@@ -297,6 +297,56 @@ def test_shards_uploaded_and_removed(setup, tmp_path):
     assert not list(kept.glob("shard_*")) and drive.uploaded() == {"shard_00000", "shard_00001"}
 
 
+def test_features_of_a_lora_model(setup, tiny_base, tmp_path):
+    """Features of a fine-tuned model: the adapter acts on them (probe_logprob = the LoRA validation probe, unlike the
+    base model's), meta.json records it, and resuming with another adapter fails."""
+    from lora.lora import probe_letter_logprobs
+    from online_vllm.models import BackboneConfig, LoRAConfig, ModelConfig, StateHeadConfig
+    from online_vllm.train.features import layout
+    from test_train import remap
+
+    data, records, config, base, builder = setup
+    lora = build_model(ModelConfig(backbone=BackboneConfig(model_id=tiny_base, dtype="float32"),
+                                   lora=LoRAConfig(r=4, alpha=8, dropout=0),
+                                   head=StateHeadConfig(hidden_dims=[16], dropout=0)), local_files_only=True).eval()
+    with torch.no_grad():  # the same sharpened base as the setup, and an adapter that changes the answers
+        for layer in lora.qwen.model.language_model.layers:
+            layer.self_attn.q_proj.base_layer.weight.mul_(6)
+            layer.self_attn.k_proj.base_layer.weight.mul_(6)
+        for name, parameter in lora.named_parameters():
+            if ".lora_B" in name:
+                parameter.normal_(std=0.5)
+    adapter = {"run": "run", "name": "best", "epoch": 2, "sha256": "a"}
+    out = extract(lora, builder, data / config.data.train, data, config.video, config.features, tmp_path / "lora",
+                  "cpu", num_workers=0, adapter=adapter)
+    fs = FeatureSet(out)
+    assert fs.meta["adapter"] == adapter
+    plain = FeatureSet(run_extract(setup))
+    assert "adapter" not in plain.meta
+    r = records[0]
+    prompt = format_prompt(r.question, r.choices)
+    inputs = remap(dict(builder._encode(prompt, read_every(data / r.video, 1, SIZE)[:16], 25)))
+    pairs = fs.patches[0]
+    expected = probe_letter_logprobs(lora, inputs, layout(inputs, prompt, builder.processor.tokenizer), range(pairs),
+                                     torch.tensor([10, 11]), device="cpu")
+    cached = torch.from_numpy(np.asarray(fs.question("probe_logprob", 0))[:, :2])
+    torch.testing.assert_close(cached, expected, rtol=1e-4, atol=1e-4)
+    assert not torch.allclose(torch.from_numpy(np.asarray(plain.question("probe_logprob", 0))[:, :2]), cached,
+                              atol=1e-3)
+    with pytest.raises(ValueError, match="other settings"):
+        extract(lora, builder, data / config.data.train, data, config.video, config.features, tmp_path / "lora",
+                "cpu", num_workers=0, adapter={**adapter, "sha256": "b"})
+
+
+def test_extract_the_first_videos(setup, tmp_path):
+    data, records, config, model, builder = setup
+    out = extract(model, builder, data / config.data.train, data, config.video, config.features, tmp_path / "v1",
+                  "cpu", num_workers=0, videos=1)
+    fs = FeatureSet(out)
+    assert [r.id for r in fs.records] == ["r0", "r1"]  # both questions of the first video, none of the second
+    assert fs.meta["records"] == 2 and fs.meta["videos"] == 1
+
+
 def test_probe_features():
     raw = np.array([[np.log(0.2), np.log(0.6), np.nan, -1.0, -2.0, -3.0, 0.5]], dtype=np.float32)
     f = probe_features(raw, 2, 3)
