@@ -5,7 +5,10 @@ The answer at pair p is the option letter the model rates highest as if the vide
 the validation (one pass per question, then the template tail after every pair). Levels and curves are those of
 eval/answers.py (chance, first pair, the pair before the answer appears, the target pair, the end of the video).
 
-python scripts/lora_answer_curves.py --run outputs/lora_200_fast --adapters none best [--part validation|test]
+By default on the test half of the run (split.json): videos that neither training nor the choice of the best epoch
+saw, so the curve of the best adapter is not flattered by its selection.
+
+python scripts/lora_answer_curves.py --run outputs/lora_200_fast --adapters none best [--part test|validation]
 """
 import argparse
 import json
@@ -84,8 +87,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True, help="output directory of train_lora_sft.py")
     parser.add_argument("--adapters", nargs="+", choices=tuple(COLORS), default=["none", "best"])
-    parser.add_argument("--part", choices=("validation", "test"), default="validation",
-                        help="half of the LoRA validation videos; test only once the model is chosen")
+    parser.add_argument("--part", choices=("validation", "test"), default="test",
+                        help="half of the LoRA validation videos: test (default) is untouched by training and by the "
+                             "choice of the best epoch; validation is the half that chose it")
     parser.add_argument("--offsets", default="-30:40", help="range of shifts from the target pair, a:b")
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", REPO / "data"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
