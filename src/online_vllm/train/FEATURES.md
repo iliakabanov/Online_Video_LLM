@@ -214,7 +214,7 @@ export HF_HOME=/путь/на/большом/диске/hf     # куда ска
 
 ```bash
 VIDEOS=all bash scripts/prepare_clevrer_proactive.sh     # вопросы, аннотации, генерация, видео train + validation
-python -m dataset_builders.clevrer_proactive.subset      # train_group1.jsonl (66 284 вопроса), val_group1.jsonl (33 191)
+python -m dataset_builders.clevrer_proactive.subset      # train_group1.jsonl (64 947 вопросов), val_group1.jsonl (32 521)
 python -m pytest -q                                      # 36 passed
 ```
 

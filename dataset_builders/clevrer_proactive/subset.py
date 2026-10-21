@@ -6,12 +6,16 @@ Dropped:
   - group 2 (an answer per interval);
   - cause_collision, cause_exit;
   - will_collide, will_exit, will_start entirely: their "no" is known only at the end, and without it every answer is "yes";
-  - clevrer_exist answered only at the end (resolved_at_end).
+  - clevrer_exist answered only at the end (resolved_at_end);
+  - official queries about the "last" object (to collide with X / that enters / that exits): the generator checks
+    finality for exist only, so these are labelled answerable at the latest such event so far, while a viewer can know
+    it is the last one only at the end of the video. Every other official query is final at its start_frame.
 In what is left an answer appears at an event inside the video and does not change.
 
     python -m dataset_builders.clevrer_proactive.subset            # -> train_group1.*, val_group1.*
 """
 import json
+import re
 
 from online_vllm.data.schema import save_jsonl
 
@@ -23,8 +27,14 @@ DROP_FAMILIES = {"cause_collision", "cause_exit", "will_collide", "will_exit", "
 SPLITS = {"train": "train_group1", "validation": "val_group1"}
 
 
+def asks_last(q):
+    """Official query whose program orders events with 'last' (the official templates always say it in the text)."""
+    return q["family"].startswith("clevrer_query") and re.search(r"\blast\b", q["question"]) is not None
+
+
 def keep(q):
-    return q["group"] == 1 and q["family"] not in DROP_FAMILIES and not q.get("resolved_at_end")
+    return (q["group"] == 1 and q["family"] not in DROP_FAMILIES and not q.get("resolved_at_end")
+            and not asks_last(q))
 
 
 def main():

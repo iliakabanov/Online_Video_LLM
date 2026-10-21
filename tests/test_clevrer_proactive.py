@@ -4,6 +4,7 @@ import json
 import pytest
 
 from dataset_builders.clevrer_proactive.paths import PROCESSED
+from dataset_builders.clevrer_proactive.subset import SPLITS, asks_last, keep
 from online_vllm.data.schema import load_jsonl
 
 N_CHOICES = {"yesno": 2, "material": 2, "shape": 3}
@@ -41,3 +42,21 @@ def test_common_schema(split):
         assert r.answers[-1].end_frame == r.num_frames - 1
         n += 1
     assert n > 0
+
+
+def test_last_queries_are_not_kept():
+    q = {"group": 1, "family": "clevrer_query_shape", "question": "What shape is the last object to collide with the cube?"}
+    assert asks_last(q) and not keep(q)
+    assert keep({**q, "question": "What shape is the first object to collide with the cube?"})
+    # Only official queries are filtered: the word alone does not drop a new-family question.
+    assert not asks_last({**q, "family": "first_hit", "question": "Which object collides last?"})
+
+
+@pytest.mark.parametrize("name", SPLITS.values())
+def test_group1_subset_matches_keep(name):
+    path = PROCESSED / f"{name}.json"
+    if not path.exists():
+        pytest.skip(f"{path} not built")
+    qs = json.loads(path.read_text(encoding="utf-8"))
+    dropped = [q["id"] for q in qs if not keep(q)]
+    assert not dropped, f"{len(dropped)} questions fail subset.keep (e.g. {dropped[:3]}); rerun subset"
