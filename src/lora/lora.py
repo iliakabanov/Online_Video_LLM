@@ -29,6 +29,7 @@ from online_vllm.data.labels import plan
 from online_vllm.data.schema import Record, load_jsonl
 from online_vllm.data.video import read_every
 from online_vllm.models.config import ModelConfig
+from online_vllm.models.model import attention_kernels
 
 
 # Validation prefixes: the first patch only; up to the target patch; up to a patch drawn uniformly from the target to
@@ -669,7 +670,11 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
         window_size = min(gradient_accumulation, batches - window_start)
         moved = _move_inputs(batch, device)
         loss = loss_fn(model, moved)
-        (loss / window_size).backward()
+        # Gradient checkpointing recomputes each layer during backward. The forward chose attention kernels under
+        # attention_kernels(); the recomputation must choose the same ones, or it saves differently shaped tensors
+        # (e.g. the math kernel's [B, heads, S, S] weights instead of the fused kernel's mask) and checkpoint fails.
+        with attention_kernels():
+            (loss / window_size).backward()
         value = float(loss.detach().cpu())
         losses.append(value)
         window_losses.append(value)
