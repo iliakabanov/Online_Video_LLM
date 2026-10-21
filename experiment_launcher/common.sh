@@ -15,10 +15,12 @@ TRAIN_FEATURES="${TRAIN_FEATURES:-/PATH/TO/TRAIN_FEATURES}"
 VAL_FEATURES="${VAL_FEATURES:-/PATH/TO/VAL_FEATURES}"
 DEVICE="${DEVICE:-cuda}"
 OVERWRITE="${OVERWRITE:-0}"
+TAG_MODE="${TAG_MODE:-hard}"
 
 run_experiment() {
   local experiment_id="$1" architecture="$2"; shift 2
   local groups=("$@") detector model_name
+  case "$TAG_MODE" in hard|step|sigmoid|gaussian) ;; *) echo "Unknown tag mode: $TAG_MODE" >&2; return 2 ;; esac
   case "$architecture" in
     mlp) detector="mlp"; model_name="statehead" ;;
     transformer) detector="transformer"; model_name="uhead" ;;
@@ -56,10 +58,10 @@ Path(os.environ["TRAIN_CONFIG"]).write_text(yaml.safe_dump(train, sort_keys=Fals
 Path(os.environ["UHEAD_CONFIG"]).write_text(yaml.safe_dump(uhead, sort_keys=False), encoding="utf-8")
 PY
   # Обучение по эпохам (best.pt / last.pt) и метрики best.pt на validation-половине при каждом пороге.
-  PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m uhead.train --tags hard --uhead "$uhead_config" \
+  PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" python -m uhead.train --tags "$TAG_MODE" --uhead "$uhead_config" \
     --train "$train_config" --data-root "$DATA_ROOT" --output "$checkpoint_dir" --results "$result_dir" \
     --device "$DEVICE" --flat-output --overwrite
-  ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" FEATURE_GROUPS="${groups[*]}" \
+  ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" FEATURE_GROUPS="${groups[*]}" TAG_MODE="$TAG_MODE" \
     CHECKPOINT="$checkpoint_dir" RESULT="$result_dir" python - <<'PY'
 import json, os
 from pathlib import Path
@@ -68,7 +70,7 @@ config = json.loads(checkpoint.joinpath("experiment.json").read_text(encoding="u
 results = json.loads(Path(os.environ["RESULT"]).joinpath("results.json").read_text(encoding="utf-8"))
 config.update({
     "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
-    "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": "hard", "seed": 0,
+    "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": os.environ["TAG_MODE"], "seed": 0,
     "checkpoint_path": str(checkpoint / "best.pt"), "best_epoch": results["best_epoch"],
 })
 Path(os.environ["RESULT"]).joinpath("run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

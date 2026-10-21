@@ -37,7 +37,8 @@ def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, 
     fs = FeatureSet(Path(data_root) / config.features.eval)
     fs.check(config.video)
     # Метки строятся так же, как при обучении: loss на test сопоставим с validation loss.
-    items, _ = labelled(fs, config, tag_settings["tags"], tag_settings["step_window"], tag_settings["sigmoid_slope"])
+    items, _ = labelled(fs, config, tag_settings["tags"], tag_settings["step_window"],
+                        tag_settings["sigmoid_slope"], tag_settings.get("gaussian_sigma", 2.0))
     test_videos = set(split["test_videos"])
     items = [item for item in items if fs.records[item.index].video in test_videos]
     if len(items) != split["test_questions"]:

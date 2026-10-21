@@ -68,7 +68,7 @@ def test_same_probabilities_have_same_metrics_for_both_adapters():
 def test_evaluation_targets_do_not_depend_on_training_tag_mode():
     probability = np.array([[.1, .2, .8, .9]])
     results = [evaluate_readiness(probability, [2], [1], [.5], 1, 1, model="uhead", tags=tags)
-               for tags in ("hard", "step", "sigmoid")]
+               for tags in ("hard", "step", "sigmoid", "gaussian")]
     assert results[0]["classification"] == results[1]["classification"] == results[2]["classification"]
 
 

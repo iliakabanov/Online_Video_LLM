@@ -29,6 +29,14 @@ class TargetTests(unittest.TestCase):
         self.assertTrue(bool((torch.from_numpy(target[1:]) > torch.from_numpy(target[:-1])).all()))
         self.assertAlmostEqual(float(make_targets(1, 0, "sigmoid")[0]), 0.9, places=6)
 
+    def test_gaussian_peak_symmetry_and_sigma_validation(self):
+        target = make_targets(7, 3, "gaussian", gaussian_sigma=2.0)
+        self.assertEqual(float(target[3]), 1.0)
+        self.assertAlmostEqual(float(target[2]), float(target[4]))
+        self.assertLess(float(target[0]), float(target[1]))
+        with self.assertRaises(ValueError):
+            make_targets(1, 0, "gaussian", gaussian_sigma=0)
+
 
 class PipelineTests(unittest.TestCase):
     @staticmethod
@@ -69,9 +77,11 @@ class PipelineTests(unittest.TestCase):
 
     def test_all_tag_modes_are_accepted_by_cli(self):
         parser = build_parser()
-        for tags in ("hard", "step", "sigmoid"):
+        for tags in ("hard", "step", "sigmoid", "gaussian"):
             args = parser.parse_args(["--tags", tags, "--output", "results"])
             self.assertEqual(args.tags, tags)
+        self.assertEqual(parser.parse_args(["--tags", "gaussian", "--gaussian-sigma", "1.5", "--output", "results"])
+                         .gaussian_sigma, 1.5)
 
 
 if __name__ == "__main__":

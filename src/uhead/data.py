@@ -27,7 +27,8 @@ class LabelledItem:
     visible_pair: int
 
 
-def labelled(fs: FeatureSet, config, tags: TagMode, step_window: int, sigmoid_slope: float) -> tuple[list[LabelledItem], int]:
+def labelled(fs: FeatureSet, config, tags: TagMode, step_window: int, sigmoid_slope: float,
+             gaussian_sigma: float = 2.0) -> tuple[list[LabelledItem], int]:
     """Создаёт бинарные GT для всех доступных пар; plan задаёт target_pair и видимость ответа."""
     items, dropped = [], 0
     for i, record in enumerate(fs.records):
@@ -40,7 +41,8 @@ def labelled(fs: FeatureSet, config, tags: TagMode, step_window: int, sigmoid_sl
             if target_pair >= length:
                 raise ValueError(f"{record.id}: target_pair is absent from extracted features")
             visible_pair = next(j for j, value in enumerate(state_plan.labels) if value != "silent")
-            items.append(LabelledItem(i, make_targets(length, target_pair, tags, step_window, sigmoid_slope),
+            items.append(LabelledItem(i, make_targets(length, target_pair, tags, step_window, sigmoid_slope,
+                                                      gaussian_sigma),
                                      target_pair, visible_pair))
     return items, dropped
 

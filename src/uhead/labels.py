@@ -4,11 +4,11 @@ from typing import Literal
 import numpy as np
 
 
-TagMode = Literal["hard", "step", "sigmoid"]
+TagMode = Literal["hard", "step", "sigmoid", "gaussian"]
 
 
 def make_targets(length: int, target_pair: int, tags: TagMode, step_window: int = 5,
-                 sigmoid_slope: float = 0.65) -> np.ndarray:
+                 sigmoid_slope: float = 0.65, gaussian_sigma: float = 2.0) -> np.ndarray:
     """Возвращает вещественные метки формы [P] без обрезания последовательности после target_pair."""
     if length < 1:
         raise ValueError("length must be positive")
@@ -18,6 +18,8 @@ def make_targets(length: int, target_pair: int, tags: TagMode, step_window: int 
         raise ValueError("step_window must be nonnegative")
     if sigmoid_slope <= 0:
         raise ValueError("sigmoid_slope must be positive")
+    if gaussian_sigma <= 0:
+        raise ValueError("gaussian_sigma must be positive")
     positions = np.arange(length, dtype=np.float32)
     if tags == "hard":
         return (positions >= target_pair).astype(np.float32)
@@ -29,4 +31,8 @@ def make_targets(length: int, target_pair: int, tags: TagMode, step_window: int 
     if tags == "sigmoid":
         values = sigmoid_slope * (positions - target_pair) + np.log(9.0)
         return (1.0 / (1.0 + np.exp(-values))).astype(np.float32)
+    if tags == "gaussian":
+        return np.exp(
+            -0.5 * ((positions - target_pair) / gaussian_sigma) ** 2
+        ).astype(np.float32)
     raise ValueError(f"Unknown tags mode: {tags}")

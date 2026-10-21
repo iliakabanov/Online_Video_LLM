@@ -158,7 +158,8 @@ def save_checkpoint(model, uhead_config, train_config, tag_settings: dict | Path
     """Сохраняет веса (path/filename), train-only normalizer buffers и выбранный режим формирования GT."""
     # Старый API передавал path четвёртым аргументом; поддерживаем его, не теряя metadata нового режима.
     if path is None:
-        path, tag_settings = Path(tag_settings), {"tags": "hard", "step_window": 5, "sigmoid_slope": 0.65}
+        path, tag_settings = Path(tag_settings), {"tags": "hard", "step_window": 5, "sigmoid_slope": 0.65,
+                                                   "gaussian_sigma": 2.0}
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     torch.save({"model_state": model.state_dict(), "tag_settings": tag_settings,
@@ -198,7 +199,7 @@ def load_checkpoint(path: str | Path, device="cpu", filename: str | None = None)
 
 def train(uhead_config, train_config, data_root: Path, output_dir: Path, device, tags: TagMode = "hard",
           step_window: int = 5, sigmoid_slope: float = 0.65, flat_output: bool = False,
-          overwrite: bool = False, results_dir: Path | None = None) -> Path:
+          overwrite: bool = False, results_dir: Path | None = None, gaussian_sigma: float = 2.0) -> Path:
     """Обучает один из трёх бинарных режимов GT; возвращает каталог запуска.
 
     В output_dir — то, что нужно для загрузки и оценки модели: best.pt, last.pt, конфиги, tags.json,
@@ -207,7 +208,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     # Сохраняем работоспособность прежнего scripts/train_uhead.py, который передавал список классов третьим аргументом.
     if isinstance(data_root, list):
         _, data_root, output_dir, device, tags = data_root, output_dir, device, tags, "hard"
-    if tags not in ("hard", "step", "sigmoid") or step_window < 0 or sigmoid_slope <= 0:
+    if tags not in ("hard", "step", "sigmoid", "gaussian") or step_window < 0 or sigmoid_slope <= 0 or gaussian_sigma <= 0:
         raise ValueError("Некорректные параметры режима разметки")
     from online_vllm.train.features import FeatureSet
     from online_vllm.train.loop import lr_factor, seed_everything
@@ -215,7 +216,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     if train_config.loss.lm_weight:
         raise NotImplementedError("UHead обучается на кешированных признаках; loss.lm_weight должен быть 0")
     seed_everything(train_config.seed)
-    tag_settings = {"tags": tags, "step_window": step_window, "sigmoid_slope": sigmoid_slope}
+    tag_settings = {"tags": tags, "step_window": step_window, "sigmoid_slope": sigmoid_slope,
+                    "gaussian_sigma": gaussian_sigma}
     model_name = "statehead" if uhead_config.temporal_detector == "mlp" else "uhead"
     train_fs = FeatureSet(Path(data_root) / train_config.features.train)
     eval_fs = FeatureSet(Path(data_root) / train_config.features.eval)
@@ -224,8 +226,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     for key in ("model_id", "revision", "quantization", "temporal_patch"):
         if train_fs.meta[key] != eval_fs.meta[key]:
             raise ValueError(f"Train и eval features расходятся по {key}")
-    train_items, train_dropped = labelled(train_fs, train_config, tags, step_window, sigmoid_slope)
-    eval_items, eval_dropped = labelled(eval_fs, train_config, tags, step_window, sigmoid_slope)
+    train_items, train_dropped = labelled(train_fs, train_config, tags, step_window, sigmoid_slope, gaussian_sigma)
+    eval_items, eval_dropped = labelled(eval_fs, train_config, tags, step_window, sigmoid_slope, gaussian_sigma)
     validation_items, test_items, split = split_by_video(eval_fs, eval_items, train_config.seed)
     logger.info("train: %d записей (%d исключено); eval: %d (%d исключено) -> validation %d вопросов / %d видео, "
                 "test %d / %d", len(train_items), train_dropped, len(eval_items), eval_dropped,
@@ -317,9 +319,10 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
 def build_parser():
     """Создаёт CLI модуля; --tags обязателен, чтобы эксперименты были явно различимы."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tags", choices=("hard", "step", "sigmoid"), required=True)
+    parser.add_argument("--tags", choices=("hard", "step", "sigmoid", "gaussian"), required=True)
     parser.add_argument("--step-window", type=int, default=5)
     parser.add_argument("--sigmoid-slope", type=float, default=0.65)
+    parser.add_argument("--gaussian-sigma", type=float, default=2.0)
     parser.add_argument("--uhead", default="configs/uhead/default.yaml")
     parser.add_argument("--train", default="configs/train/group1.yaml")
     parser.add_argument("--output", required=True, help="каталог весов и конфигов (best.pt, last.pt, split.json)")
@@ -332,15 +335,15 @@ def build_parser():
 
 
 def main():
-    """Точка запуска: python -m uhead.train --tags {hard,step,sigmoid} ..."""
+    """Точка запуска: python -m uhead.train --tags {hard,step,sigmoid,gaussian} ..."""
     args = build_parser().parse_args()
-    if args.step_window < 0 or args.sigmoid_slope <= 0:
-        raise ValueError("step-window должен быть >= 0, sigmoid-slope — положительным")
+    if args.step_window < 0 or args.sigmoid_slope <= 0 or args.gaussian_sigma <= 0:
+        raise ValueError("step-window должен быть >= 0, sigmoid-slope и gaussian-sigma — положительными")
     from online_vllm.train.config import TrainConfig
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     result = train(UHeadConfig.load(args.uhead), TrainConfig.load(args.train), Path(args.data_root), Path(args.output),
                    args.device, args.tags, args.step_window, args.sigmoid_slope, args.flat_output, args.overwrite,
-                   Path(args.results) if args.results else None)
+                   Path(args.results) if args.results else None, gaussian_sigma=args.gaussian_sigma)
     print("Каталог запуска:", result)
 
 

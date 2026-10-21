@@ -28,6 +28,7 @@
 - `hard`: 0 до целевой пары и 1 начиная с неё;
 - `step`: 0.5 в окне `--step-window` (по умолчанию 5) перед целью;
 - `sigmoid`: гладкий переход с наклоном `--sigmoid-slope` (по умолчанию 0.65) и значением 0.9 в целевой паре.
+- `gaussian`: симметричный пик со значением 1 в целевой паре и стандартным отклонением `--gaussian-sigma` (по умолчанию 2.0).
 
 Все режимы используют все доступные пары видео, включая пары после target pair. Loss — `binary_cross_entropy_with_logits` только по непустым позициям. Результаты автоматически сохраняются в подкаталоге режима (`hard`, `step` или `sigmoid`), а параметры разметки — в `tags.json` checkpoint-а.
 
@@ -39,6 +40,7 @@
 PYTHONPATH=src python -m uhead.train --tags hard --output outputs/group1_uhead --device cuda
 PYTHONPATH=src python -m uhead.train --tags step --step-window 5 --output outputs/group1_uhead --device cuda
 PYTHONPATH=src python -m uhead.train --tags sigmoid --sigmoid-slope 0.65 --output outputs/group1_uhead --device cuda
+PYTHONPATH=src python -m uhead.train --tags gaussian --gaussian-sigma 2.0 --output outputs/group1_uhead --device cuda
 ```
 
 Аргумент `--uhead` задаёт архитектурный YAML, а `--train` — существующий тренировочный YAML с путями к shards и порогами. Для ablation удалите ненужные имена из `groups` в `configs/uhead/default.yaml`.
