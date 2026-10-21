@@ -13,8 +13,6 @@ from lora.lora import (
     SELECTION_METRIC,
     _accuracy_deltas,
     _build_sft_example,
-    _candidate_score,
-    _choice_scores,
     _prepare_output_dir,
     _is_new_best,
     _train_epoch,
@@ -239,34 +237,39 @@ def test_answer_position_loss_equals_qwen_causal_lm_loss_and_reaches_lora(builde
     assert grads and all(g is not None and g.abs().sum() > 0 for g in grads)
 
 
-class _LogitResult:
-    def __init__(self, logits):
-        self.logits = logits
+def test_cached_probes_equal_separate_forwards_on_truncated_videos(builder, tiny_base):
+    """One pass over the whole video plus probe tails == one full forward per truncated video, at every pair."""
+    import numpy as np
+    from lora.lora import probe_letter_logprobs
+    from online_vllm.data.inputs import format_prompt
+    from online_vllm.train.features import layout
 
+    model = _tiny_model(tiny_base, lora=False).eval()
+    # Random small weights give near-uniform attention; sharpen it so wrong masks or positions would show.
+    with torch.no_grad():
+        for layer in model.qwen.model.language_model.layers:
+            layer.self_attn.q_proj.weight.mul_(6)
+            layer.self_attn.k_proj.weight.mul_(6)
+    frames = np.random.default_rng(1).integers(0, 256, (8, 8, 4, 3), dtype=np.uint8)  # 4 pairs
+    prompt = format_prompt("question", ["green", "red", "question"])
+    letters = torch.tensor([10, 11, 12])  # A, B, C in the toy vocabulary
 
-class _ChoiceModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.calls = 0
+    def encode(n_frames):
+        x = dict(builder._encode(prompt, frames[:n_frames], 25))
+        ids = x["input_ids"].clone()
+        for old, new in ((2, 60), (3, 61), (4, 62), (5, 63)):  # toy special tokens -> tiny Qwen vocabulary
+            x["input_ids"][ids == old] = new
+        return x
 
-    def forward(self, inputs, *, mode):
-        assert mode == "language"
-        self.calls += 1
-        vocabulary = 11
-        logits = torch.arange(vocabulary, dtype=torch.float32).view(1, 1, vocabulary)
-        return _LogitResult(logits.expand(1, inputs["input_ids"].shape[1], vocabulary).clone())
-
-
-def test_one_token_choice_fast_path_matches_full_likelihood_fallback():
-    model = _ChoiceModel()
-    prompt = {"input_ids": torch.tensor([[1, 2]]), "attention_mask": torch.ones(1, 2, dtype=torch.long),
-              "mm_token_type_ids": torch.zeros(1, 2, dtype=torch.long)}
-    choices = [torch.tensor([3]), torch.tensor([5]), torch.tensor([7]), torch.tensor([9])]
-    fast = _choice_scores(model, prompt, choices, device="cpu")
-    assert model.calls == 1
-    fallback = [_candidate_score(model, prompt, choice, "cpu") for choice in choices]
-    assert fast == fallback
-    assert max(range(len(fast)), key=fast.__getitem__) == max(range(len(fallback)), key=fallback.__getitem__)
+    full = encode(8)
+    lay = layout(full, prompt, builder.processor.tokenizer)
+    assert lay.num_pairs == 4
+    pairs = [0, 2, 3]
+    cached = probe_letter_logprobs(model, full, lay, pairs, letters, device="cpu")
+    with torch.no_grad():
+        for row, pair in enumerate(pairs):
+            logits = model(encode(2 * (pair + 1)), mode="language").logits[0, -1].float()
+            torch.testing.assert_close(cached[row], logits.log_softmax(-1)[letters], rtol=1e-4, atol=1e-4)
 
 
 def test_nonempty_output_dir_requires_explicit_overwrite(tmp_path):

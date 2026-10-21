@@ -24,13 +24,13 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from online_vllm.data.inputs import InputBuilder, answer_letter, format_prompt
-from online_vllm.data.inputs import IGNORE
+from online_vllm.data.inputs import IGNORE, LETTERS, InputBuilder, answer_letter, format_prompt
 from online_vllm.data.labels import plan
 from online_vllm.data.schema import Record, load_jsonl
 from online_vllm.data.video import read_every
 from online_vllm.models.config import ModelConfig
 from online_vllm.models.model import attention_kernels
+from online_vllm.train.features import Layout, layout
 
 
 # Validation prefixes: the first patch only; up to the target patch; up to a patch drawn uniformly from the target to
@@ -378,17 +378,16 @@ def masked_sft_loss(model: torch.nn.Module, batch: Mapping[str, Any]) -> torch.T
 
 @dataclass(frozen=True)
 class ChoiceEvaluationExample:
-    """Schema-free validation interface produced by a future dataset adapter.
-
-    ``inputs_by_time`` has exactly the keys of ``TIME_POINTS``.
-    Each value is a single, processor-ready prompt/video payload without answer
-    tokens. ``choice_token_ids`` holds one or more token IDs for each option.
-    """
+    """One question to evaluate: the whole video once, and for every point of ``TIME_POINTS`` the last pair the model
+    may see. ``inputs`` is a processor-ready prompt/video payload without answer tokens, ``layout`` locates its pairs
+    and template tail (``train/features.layout``), ``letter_ids`` holds the single token of each option letter."""
 
     record_id: str
     answer_index: int
-    choice_token_ids: Sequence[torch.Tensor]
-    inputs_by_time: Mapping[str, Mapping[str, Any]]
+    letter_ids: torch.Tensor
+    inputs: Mapping[str, Any]
+    layout: Layout
+    pair_by_time: Mapping[str, int]
     family: str | None = None
 
 
@@ -428,29 +427,26 @@ class ClevrerLoRAValidationProvider:
     def iter_choice_examples(self, resolution: tuple[int, int]) -> Iterable[ChoiceEvaluationExample]:
         if len(resolution) != 2 or any(side <= 0 or side % 28 for side in resolution):
             raise ValueError("evaluation resolution must be [width, height], multiples of 28")
+        tokenizer = self.builder.processor.tokenizer
         for record in self.records:
             frames, target, patches = _prefix_context(
                 record, data_root=self.data_root, builder=self.builder, frame_stride=self.split.frame_stride,
                 speak_delay=self.split.speak_delay, frame_size=resolution)
-            choices = []
-            for letter in "ABCDEFGH"[:len(record.choices)]:
-                token_ids = self.builder.processor.tokenizer(letter, add_special_tokens=False).input_ids
-                if not token_ids:
-                    raise ValueError(f"{record.id}: empty tokenization for answer letter {letter}")
-                choices.append(torch.tensor(token_ids, dtype=torch.long))
+            letters = [tokenizer(letter, add_special_tokens=False).input_ids for letter in LETTERS[:len(record.choices)]]
+            if any(len(ids) != 1 for ids in letters):
+                raise ValueError(f"{record.id}: option letters must be single tokens")
             answerable = sample_prefix(target, patches, seed=VALIDATION_PREFIX_SEED, epoch=0,
                                        example_key=record.id).last_patch
-            prefixes = {"start": 0, "target": target, "answerable": answerable, "end": patches - 1}
-            inputs = {
-                point: dict(self.builder._encode(
-                    format_prompt(record.question, record.choices),
-                    frames[:(last_patch + 1) * self.builder.temporal_patch],
-                    record.fps / self.split.frame_stride))
-                for point, last_patch in prefixes.items()
-            }
+            prompt = format_prompt(record.question, record.choices)
+            inputs = dict(self.builder._encode(prompt, frames, record.fps / self.split.frame_stride))
+            lay = layout(inputs, prompt, tokenizer)
+            if lay.num_pairs != patches:
+                raise ValueError(f"{record.id}: {lay.num_pairs} pairs in the input, {patches} decoded")
             yield ChoiceEvaluationExample(
                 record_id=record.id, answer_index=record.choices.index(record.answers[0].answer),
-                choice_token_ids=choices, inputs_by_time=inputs, family=record.meta.get("family"))
+                letter_ids=torch.tensor([ids[0] for ids in letters]), inputs=inputs, layout=lay,
+                pair_by_time={"start": 0, "target": target, "answerable": answerable, "end": patches - 1},
+                family=record.meta.get("family"))
 
 
 def build_clevrer_lora_data(*, data_root: str | Path, builder: InputBuilder, split: ClevrerLoRASplitConfig,
@@ -493,53 +489,43 @@ def _move_inputs(inputs: Mapping[str, Any], device: torch.device | str) -> dict[
     return {key: value.to(device) if torch.is_tensor(value) else value for key, value in inputs.items()}
 
 
-def _candidate_score(model: torch.nn.Module, prompt: Mapping[str, Any], candidate: torch.Tensor,
-                     device: torch.device | str) -> float:
-    """Log P(candidate | prompt), including every candidate token."""
-    if candidate.ndim != 1 or candidate.numel() < 1:
-        raise ValueError("Each answer choice must be a nonempty 1D token tensor")
-    inputs = _move_inputs(prompt, device)
-    required = {"input_ids", "attention_mask", "mm_token_type_ids"}
-    if required - set(inputs):
-        raise KeyError(f"Validation prompt missing {sorted(required - set(inputs))}")
-    if inputs["input_ids"].shape[0] != 1:
-        raise ValueError("Choice scoring accepts one prompt at a time")
-    candidate = candidate.to(device=device, dtype=inputs["input_ids"].dtype)[None]
-    prefix = inputs["input_ids"].shape[1]
-    inputs["input_ids"] = torch.cat((inputs["input_ids"], candidate), dim=1)
-    inputs["attention_mask"] = torch.cat((inputs["attention_mask"], torch.ones_like(candidate)), dim=1)
-    inputs["mm_token_type_ids"] = torch.cat((inputs["mm_token_type_ids"],
-                                               torch.zeros_like(candidate, dtype=inputs["mm_token_type_ids"].dtype)), dim=1)
-    with torch.inference_mode():
-        logits = model(inputs, mode="language").logits[0, prefix - 1:prefix - 1 + candidate.shape[1]].float()
-    token_logprob = logits.log_softmax(-1).gather(1, candidate[0, :, None]).sum()
-    return float(token_logprob.cpu())
+@torch.inference_mode()
+def probe_letter_logprobs(model: torch.nn.Module, inputs: Mapping[str, Any], lay: Layout, pairs: Sequence[int],
+                          letter_ids: torch.Tensor, *, device: torch.device | str) -> torch.Tensor:
+    """log P(option letter) at the assistant position as if the video ended after each of ``pairs``: [len(pairs), K].
 
-
-def _choice_scores(model: torch.nn.Module, prompt: Mapping[str, Any], choices: Sequence[torch.Tensor], *,
-                   device: torch.device | str) -> list[float]:
-    """Score choices with one prompt pass when all answer choices are one token.
-
-    The fast path is mathematically the first-token special case of
-    :func:`_candidate_score`; multi-token candidates retain the full
-    autoregressive fallback.
+    One pass over the question and the whole video, then the template tail after every requested pair in one small
+    pass on top of its key/value cache, as the probe features (train/features.py). The tail of pair p attends only to
+    the tokens up to the end of pair p, and its positions continue from there. The vision encoder does not mix pairs
+    and the language model is causal, so this equals a separate forward on each truncated video, at a fraction of
+    the cost: the vision encoder and the long prefix run once instead of once per pair.
     """
-    if not choices:
-        raise ValueError("At least one answer choice is required")
-    if not all(torch.is_tensor(choice) and choice.ndim == 1 and choice.numel() >= 1 for choice in choices):
-        raise ValueError("Each answer choice must be a nonempty 1D token tensor")
-    if not all(choice.numel() == 1 for choice in choices):
-        return [_candidate_score(model, prompt, choice, device) for choice in choices]
-    inputs = _move_inputs(prompt, device)
-    required = {"input_ids", "attention_mask", "mm_token_type_ids"}
-    if required - set(inputs):
-        raise KeyError(f"Validation prompt missing {sorted(required - set(inputs))}")
-    if inputs["input_ids"].shape[0] != 1 or not inputs["attention_mask"].bool().all():
-        raise ValueError("One-token fast path requires one unpadded prompt")
-    with torch.inference_mode():
-        logits = model(inputs, mode="language").logits[0, -1].float()
-    choice_ids = torch.stack([choice.to(device=logits.device, dtype=torch.long)[0] for choice in choices])
-    return [float(value) for value in logits.log_softmax(-1)[choice_ids].cpu()]
+    qwen = model.qwen.model
+    inputs = {key: inputs[key].to(device) for key in
+              ("input_ids", "mm_token_type_ids", "pixel_values_videos", "video_grid_thw", "second_per_grid_ts")}
+    if inputs["input_ids"].shape[0] != 1:
+        raise ValueError("Probing takes one question at a time")
+    positions, _ = qwen.get_rope_index(
+        inputs["input_ids"], inputs["mm_token_type_ids"], video_grid_thw=inputs["video_grid_thw"],
+        second_per_grid_ts=inputs["second_per_grid_ts"], attention_mask=torch.ones_like(inputs["input_ids"]))
+    qwen.rope_deltas = None
+    with attention_kernels():
+        out = qwen(**inputs, position_ids=positions, use_cache=True, return_dict=True)
+    length, t = inputs["input_ids"].shape[1], len(lay.tail)
+    decisions = lay.decisions(device)[torch.as_tensor(list(pairs), device=device)]          # last token of each pair
+    probe_of = torch.arange(len(decisions), device=device).repeat_interleave(t)
+    step_of = torch.arange(t, device=device).repeat(len(decisions))
+    reach = positions.max(0).values[0].cummax(-1).values                                     # largest position so far
+    tail_positions = (reach[decisions] + 1).repeat_interleave(t) + step_of
+    prefix = torch.arange(length, device=device)[None] <= decisions[probe_of][:, None]        # [Q * t, S]
+    own_tail = (probe_of[:, None] == probe_of[None]) & (step_of[None] <= step_of[:, None])   # [Q * t, Q * t]
+    with attention_kernels():
+        probe = qwen(input_ids=torch.tensor(lay.tail, device=device).repeat(len(decisions))[None],
+                     position_ids=tail_positions[None, None].expand(3, 1, -1),
+                     attention_mask=torch.cat([prefix, own_tail], 1)[None, None],
+                     past_key_values=out.past_key_values, use_cache=True, return_dict=True)
+    final = probe.last_hidden_state[0, torch.arange(len(decisions), device=device) * t + t - 1]
+    return model.qwen.lm_head(final).float().log_softmax(-1)[:, letter_ids.to(device)]
 
 
 @torch.inference_mode()
@@ -552,16 +538,20 @@ def evaluate_choice_examples(model: torch.nn.Module, examples: Iterable[ChoiceEv
     rows: list[dict[str, Any]] = []
     try:
         for example in tqdm(examples, total=total, desc=desc, unit="q", dynamic_ncols=True):
-            if set(example.inputs_by_time) != set(TIME_POINTS):
-                raise ValueError(f"inputs_by_time must contain exactly {', '.join(TIME_POINTS)}")
-            if not 0 <= example.answer_index < len(example.choice_token_ids):
+            if set(example.pair_by_time) != set(TIME_POINTS):
+                raise ValueError(f"pair_by_time must contain exactly {', '.join(TIME_POINTS)}")
+            if not 0 <= example.answer_index < len(example.letter_ids):
                 raise ValueError(f"{example.record_id}: invalid answer_index")
+            pairs = sorted(set(example.pair_by_time.values()))
+            scores = probe_letter_logprobs(model, example.inputs, example.layout, pairs, example.letter_ids,
+                                           device=device).cpu().tolist()
             row = {"record_id": example.record_id, "family": example.family,
                    "answer_index": example.answer_index, "resolution": list(resolution), "predictions": {}}
             for point in TIME_POINTS:
-                scores = _choice_scores(model, example.inputs_by_time[point], example.choice_token_ids, device=device)
-                chosen = int(max(range(len(scores)), key=scores.__getitem__))
-                row["predictions"][point] = {"chosen_index": chosen, "scores": scores,
+                pair = example.pair_by_time[point]
+                values = scores[pairs.index(pair)]
+                chosen = int(max(range(len(values)), key=values.__getitem__))
+                row["predictions"][point] = {"last_pair": pair, "chosen_index": chosen, "scores": values,
                                               "correct": chosen == example.answer_index}
             rows.append(row)
     finally:
