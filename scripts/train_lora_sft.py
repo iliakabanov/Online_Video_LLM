@@ -1,7 +1,10 @@
 """Train Qwen2.5-VL LoRA SFT on the documented CLEVRER group-1 video split.
 
-The first 5,000 scene-indexed train videos train LoRA; the first 2,000
-scene-indexed validation videos select the adapter by end-video accuracy.
+The first 5,000 scene-indexed train videos train LoRA. The first 2,000 scene-indexed validation videos are halved
+by video (with a fixed seed, the same for every run): the validation half selects the adapter by accuracy on a prefix ending uniformly between the target
+and the end of the video (fixed per question; start, target and end are reported too), evaluated before training and
+after every epoch at the training frame size; the test half is left for scripts/evaluate_lora_sft.py (split.json).
+Batches of 4 sequences, no accumulation, constant learning rate.
 """
 import argparse
 import os
@@ -37,13 +40,16 @@ def main() -> None:
     args = parser.parse_args()
 
     model_config = ModelConfig.load(args.model)
-    model = build_model(model_config, local_files_only=args.local_files_only, device=args.device)
     sft = LoRASFTConfig(overwrite=args.overwrite)
+    torch.manual_seed(sft.seed)  # the random LoRA A initialization happens in build_model
+    model = build_model(model_config, local_files_only=args.local_files_only, device=args.device)
     model = prepare_lora_sft_model(model, model.config, gradient_checkpointing=sft.gradient_checkpointing)
     builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     split = ClevrerLoRASplitConfig(train_videos=args.train_videos, validation_videos=args.validation_videos)
-    loader, validation = build_clevrer_lora_data(data_root=args.data_root, builder=builder, split=split, seed=sft.seed)
-    train_lora_sft(model, loader, sft, output_dir=args.output, device=args.device, validation_provider=validation)
+    loader, validation, split_info = build_clevrer_lora_data(data_root=args.data_root, builder=builder, split=split,
+                                                             seed=sft.seed, batch_size=sft.batch_size)
+    train_lora_sft(model, loader, sft, output_dir=args.output, device=args.device, validation_provider=validation,
+                   validation_resolution=split.train_frame_size, split_info=split_info)
 
 
 if __name__ == "__main__":

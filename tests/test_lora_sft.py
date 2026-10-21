@@ -1,5 +1,6 @@
 """Unit tests for schema-free LoRA SFT infrastructure."""
 import collections
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from lora.lora import (
     IGNORE,
     SELECTION_METRIC,
     _accuracy_deltas,
+    _build_sft_example,
     _candidate_score,
     _choice_scores,
     _prepare_output_dir,
@@ -36,23 +38,42 @@ def _example(length=4):
             "second_per_grid_ts": torch.tensor([0.08])}
 
 
+def test_sft_example_supervises_only_the_answer_letter():
+    vocab = {"A": 11, "B": 12, "<|im_end|>": 99}
+
+    class Tokenizer:
+        eos_token = "<|im_end|>"
+
+        def __call__(self, text, add_special_tokens=False, return_tensors=None):
+            ids = [vocab[text]] if text in vocab else [vocab["B"], vocab["<|im_end|>"]]
+            return SimpleNamespace(input_ids=torch.tensor([ids]) if return_tensors == "pt" else ids)
+
+    prompt = torch.tensor([[1, 2, 3]])
+    builder = SimpleNamespace(
+        processor=SimpleNamespace(tokenizer=Tokenizer()),
+        _encode=lambda text, frames, fps: {"input_ids": prompt.clone(), "attention_mask": torch.ones_like(prompt),
+                                           "mm_token_type_ids": torch.zeros_like(prompt)})
+    record = SimpleNamespace(question="Q?", choices=["red", "blue"], answers=[SimpleNamespace(answer="blue")])
+    example = _build_sft_example(builder, record, frames=None, fps=25.0)
+    assert example["input_ids"].tolist() == [[1, 2, 3, 12]]  # the letter B and no EOS after it
+    assert example["labels"].tolist() == [[IGNORE, IGNORE, IGNORE, 12]]
+    assert example["answer_ids"].tolist() == [12]
+
+
 def test_multiprefix_is_deterministic_and_never_precedes_target():
     values = [sample_prefix(4, 20, seed=9, epoch=3, example_key=str(i)) for i in range(500)]
     again = [sample_prefix(4, 20, seed=9, epoch=3, example_key=str(i)) for i in range(500)]
     assert values == again
     assert all(4 <= value.last_patch < 20 for value in values)
-    counts = collections.Counter(value.mode for value in values)
-    # Statistical guard against accidentally dropping a branch; exact ratios are
-    # guaranteed only over an infinite number of independently keyed examples.
-    assert set(counts) == {"target", "near_target", "after_target", "full"}
+    assert {value.mode for value in values} == {"after_target"}
 
 
-def test_multiprefix_distribution_remains_40_30_20_10():
+def test_prefix_end_is_uniform_from_target_to_video_end():
     counts = collections.Counter(
-        sample_prefix(4, 20, seed=123, epoch=2, example_key=str(i)).mode for i in range(20_000))
-    expected = {"target": .40, "near_target": .30, "after_target": .20, "full": .10}
-    for mode, probability in expected.items():
-        assert abs(counts[mode] / 20_000 - probability) < .015
+        sample_prefix(4, 20, seed=123, epoch=2, example_key=str(i)).last_patch for i in range(16_000))
+    # 16 equally likely ends, patches 4..19 inclusive: 1000 each in expectation.
+    assert set(counts) == set(range(4, 20))
+    assert all(abs(count / 16_000 - 1 / 16) < .01 for count in counts.values())
 
 
 class _EpochPrefixDataset(Dataset):
@@ -152,11 +173,11 @@ def test_final_gradient_accumulation_window_uses_actual_size():
     model = _TinySFTModel()
     batches = [collate_sft([_example(2)], pad_id=0) for _ in range(3)]
     optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
-    _, steps, records = _train_epoch(model, batches, optimizer=optimizer, scheduler=scheduler,
+    _, steps, records = _train_epoch(model, batches, optimizer=optimizer,
                                      gradient_accumulation=2, grad_clip=100.0,
                                      parameters=list(model.parameters()), device="cpu", epoch=7,
-                                     global_step_start=10)
+                                     global_step_start=10,
+                                     loss_fn=lambda m, batch: m(batch, mode="language").loss)
     # First two examples average to one SGD step from 0 to 2.  The final,
     # one-example window must use its own denominator (1), returning to 0.
     assert steps == 2
@@ -164,6 +185,58 @@ def test_final_gradient_accumulation_window_uses_actual_size():
     assert [record["effective_accumulation_steps"] for record in records] == [2, 1]
     assert [record["global_step"] for record in records] == [11, 12]
     assert all(record["epoch"] == 7 and record["gradient_norm"] >= 0 for record in records)
+
+
+def _tiny_sft_examples(builder):
+    import numpy as np
+    rng = np.random.default_rng(0)
+    examples = []
+    for n_frames, answer in ((4, "green"), (6, "red")):
+        record = SimpleNamespace(question="question", choices=["green", "red"], answers=[SimpleNamespace(answer=answer)])
+        example = _build_sft_example(builder, record, rng.integers(0, 256, (n_frames, 8, 4, 3), dtype=np.uint8), fps=25)
+        ids = example["input_ids"].clone()
+        for old, new in ((2, 60), (3, 61), (4, 62), (5, 63)):  # toy special tokens -> tiny Qwen vocabulary
+            example["input_ids"][ids == old] = new
+        examples.append(example)
+    assert examples[0]["input_ids"].shape[1] != examples[1]["input_ids"].shape[1]
+    return examples
+
+
+def _tiny_model(tiny_base, lora):
+    from online_vllm.models import BackboneConfig, LoRAConfig, ModelConfig, StateHeadConfig, build_model
+    model = build_model(ModelConfig(backbone=BackboneConfig(model_id=tiny_base, dtype="float32"),
+                                    lora=LoRAConfig(enabled=lora, r=4, alpha=8, dropout=0),
+                                    head=StateHeadConfig(hidden_dims=[16], dropout=0)), local_files_only=True)
+    model.state_head.requires_grad_(False)
+    return model
+
+
+def test_right_padded_video_batch_loss_equals_mean_of_single_losses(builder, tiny_base):
+    """Batch of 2 videos of different length (right padding) == the two examples one by one, on the tiny Qwen."""
+    from lora.lora import masked_sft_loss
+    model, examples = _tiny_model(tiny_base, lora=False).eval(), _tiny_sft_examples(builder)
+    with torch.no_grad():
+        single = [masked_sft_loss(model, collate_sft([example], pad_id=1)) for example in examples]
+        batch = masked_sft_loss(model, collate_sft(examples, pad_id=1))
+    # One supervised token per example, so the batch loss is the mean of the two.
+    torch.testing.assert_close(batch, torch.stack(single).mean(), rtol=1e-4, atol=1e-4)
+
+
+def test_answer_position_loss_equals_qwen_causal_lm_loss_and_reaches_lora(builder, tiny_base):
+    """lm_head only before the answer token == Qwen's own shifted loss over the full logits; LoRA gets gradients."""
+    from lora.lora import ANSWER_IDS_KEY, masked_sft_loss
+    model, examples = _tiny_model(tiny_base, lora=True), _tiny_sft_examples(builder)
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if ".lora_B" in name:
+                parameter.normal_(std=0.1)  # B starts at zero; make the adapter change the output
+    batch = collate_sft(examples, pad_id=1)
+    reference = model({k: v for k, v in batch.items() if k != ANSWER_IDS_KEY}, mode="language").loss
+    loss = masked_sft_loss(model, batch)
+    torch.testing.assert_close(loss, reference, rtol=1e-4, atol=1e-4)
+    loss.backward()
+    grads = [p.grad for name, p in model.named_parameters() if ".lora_A" in name]
+    assert grads and all(g is not None and g.abs().sum() > 0 for g in grads)
 
 
 class _LogitResult:
@@ -242,20 +315,82 @@ def test_clevrer_lora_partition_is_first_scene_indexed_videos(tmp_path):
     assert {record.video for record in selected} == {"early.mp4", "middle.mp4"}
 
 
-def test_lora_checkpoint_selection_metric_is_end_accuracy():
-    assert SELECTION_METRIC == "end_micro_accuracy"
+def _scene_records(n_videos, per_video=3):
+    return [Record(f"v{v}-q{q}", "x", "validation", f"v{v}.mp4", 25, 128, "q", ["a"], 0, [Interval(25, 127, "a")],
+                   {"scene_index": v}) for v in range(n_videos) for q in range(per_video)]
+
+
+def test_validation_videos_are_halved_by_video_and_deterministically():
+    from lora.lora import split_validation_videos
+    records = _scene_records(9)
+    validation, test, info = split_validation_videos(records, seed=0)
+    assert info["validation_videos"] == sorted(info["validation_videos"])
+    assert len(info["validation_videos"]) == 4 and len(info["test_videos"]) == 5
+    assert not set(info["validation_videos"]) & set(info["test_videos"])
+    assert {r.video for r in validation} == set(info["validation_videos"])
+    assert {r.video for r in test} == set(info["test_videos"])
+    assert len(validation) + len(test) == len(records) and info["test_questions"] == len(test)
+    assert split_validation_videos(list(reversed(records)), seed=0)[2] == info  # order of the file does not matter
+    assert split_validation_videos(records, seed=1)[2]["test_videos"] != info["test_videos"]
+
+
+def test_test_half_is_rebuilt_from_split_json(tmp_path):
+    from dataclasses import asdict
+    from lora.lora import clevrer_lora_test_provider, split_validation_videos
+    records = _scene_records(10)
+    save_jsonl(records, tmp_path / "processed" / "val.jsonl")
+    split = ClevrerLoRASplitConfig(validation="processed/val.jsonl", validation_videos=8)
+    _, test, info = split_validation_videos(records[:8 * 3], seed=0)  # the first 8 videos are the LoRA part
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "split.json").write_text(json.dumps({"data": asdict(split), **info}), encoding="utf-8")
+    provider, loaded = clevrer_lora_test_provider(run, data_root=tmp_path, builder=None)
+    assert [r.id for r in provider.records] == [r.id for r in test]
+    assert loaded == split
+    save_jsonl(records[3:], tmp_path / "processed" / "val.jsonl")  # the file changed since training
+    with pytest.raises(ValueError, match="no longer matches"):
+        clevrer_lora_test_provider(run, data_root=tmp_path, builder=None)
+
+
+def test_saved_adapter_loads_into_a_fresh_model(tiny_base, tmp_path):
+    from lora.lora import load_lora_adapter, save_lora_adapter
+    from online_vllm.models import BackboneConfig, LoRAConfig, ModelConfig, StateHeadConfig, build_model
+    from peft import get_peft_model_state_dict
+
+    config = ModelConfig(backbone=BackboneConfig(model_id=tiny_base, dtype="float32"),
+                         lora=LoRAConfig(r=4, alpha=8), head=StateHeadConfig(hidden_dims=[16], dropout=0))
+    trained = build_model(config, local_files_only=True)
+    trained.state_head.requires_grad_(False)  # as prepare_lora_sft_model does
+    with torch.no_grad():
+        for name, parameter in trained.named_parameters():
+            if parameter.requires_grad and ".lora_" in name:
+                parameter.normal_()
+    save_lora_adapter(trained, tmp_path / "best")
+    fresh = load_lora_adapter(build_model(config, local_files_only=True), tmp_path / "best")
+    saved, loaded = get_peft_model_state_dict(trained.backbone), get_peft_model_state_dict(fresh.backbone)
+    assert saved.keys() == loaded.keys()
+    for key in saved:
+        torch.testing.assert_close(loaded[key], saved[key])
+
+
+def test_lora_checkpoint_selection_metric_is_answerable_prefix_accuracy():
+    assert SELECTION_METRIC == "answerable_micro_accuracy"
     assert ClevrerLoRASplitConfig().train_videos == 5000
     assert ClevrerLoRASplitConfig().validation_videos == 2000
 
 
 def test_accuracy_deltas_are_percentage_points_and_resolution_local():
     baseline = {
-        "252x168": {"start_micro_accuracy": .2, "target_micro_accuracy": .3, "end_micro_accuracy": .4},
-        "504x336": {"start_micro_accuracy": .5, "target_micro_accuracy": .6, "end_micro_accuracy": .7},
+        "252x168": {"start_micro_accuracy": .2, "target_micro_accuracy": .3, "answerable_micro_accuracy": .35,
+                    "end_micro_accuracy": .4},
+        "504x336": {"start_micro_accuracy": .5, "target_micro_accuracy": .6, "answerable_micro_accuracy": .65,
+                    "end_micro_accuracy": .7},
     }
     current = {
-        "252x168": {"start_micro_accuracy": .25, "target_micro_accuracy": .3, "end_micro_accuracy": .45},
-        "504x336": {"start_micro_accuracy": .4, "target_micro_accuracy": .65, "end_micro_accuracy": .7},
+        "252x168": {"start_micro_accuracy": .25, "target_micro_accuracy": .3, "answerable_micro_accuracy": .4,
+                    "end_micro_accuracy": .45},
+        "504x336": {"start_micro_accuracy": .4, "target_micro_accuracy": .65, "answerable_micro_accuracy": .65,
+                    "end_micro_accuracy": .7},
     }
     delta = _accuracy_deltas(current, baseline)
     assert delta["252x168"]["start_accuracy_delta_pp"] == pytest.approx(5.0)

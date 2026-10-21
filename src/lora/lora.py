@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from hashlib import blake2b
 import json
-import math
 from pathlib import Path
 import random
 import shutil
@@ -32,29 +31,33 @@ from online_vllm.data.video import read_every
 from online_vllm.models.config import ModelConfig
 
 
-TIME_POINTS = ("start", "target", "end")
+# Validation prefixes: the first patch only; up to the target patch; up to a patch drawn uniformly from the target to
+# the end (fixed per question, like a training prefix); the whole video.
+TIME_POINTS = ("start", "target", "answerable", "end")
+VALIDATION_PREFIX_SEED = 0
+# Fixed, unlike the training seed: every run is selected on the same validation half and tested on the same test half.
+VALIDATION_SPLIT_SEED = 0
 VIDEO_KEYS = ("pixel_values_videos", "video_grid_thw", "second_per_grid_ts")
 TOKEN_KEYS = ("input_ids", "attention_mask", "mm_token_type_ids", "labels")
 ANSWER_IDS_KEY = "answer_ids"
 EXPECTED_LORA_LEAVES = frozenset(("q_proj", "k_proj", "v_proj", "o_proj"))
 EXPECTED_LORA_TARGETS = 36 * len(EXPECTED_LORA_LEAVES)
-SELECTION_METRIC = "end_micro_accuracy"
+# Mean accuracy over prefixes where the answer is already visible: what a good offline model for this task is for.
+SELECTION_METRIC = "answerable_micro_accuracy"
 
 
 @dataclass(frozen=True)
 class LoRASFTConfig:
     """Optimization and checkpoint policy, independent of a future data schema."""
 
-    learning_rate: float = 1.0e-4
+    learning_rate: float = 1.0e-4  # constant: no warmup, no decay
     weight_decay: float = 0.01
     betas: tuple[float, float] = (0.9, 0.95)
     grad_clip: float = 1.0
-    batch_size: int = 1
-    gradient_accumulation: int = 32
+    batch_size: int = 4  # right-padded sequences per forward pass
+    gradient_accumulation: int = 1
     epochs: int = 3
-    warmup_steps: int = 200
     gradient_checkpointing: bool = True
-    selection_resolution: str = "252x168"
     seed: int = 0
     overwrite: bool = False
 
@@ -63,12 +66,8 @@ class LoRASFTConfig:
             raise ValueError("learning_rate/grad_clip must be positive and weight_decay nonnegative")
         if len(self.betas) != 2 or any(not 0 <= beta < 1 for beta in self.betas):
             raise ValueError("betas must be two values in [0, 1)")
-        if self.batch_size != 1:
-            raise ValueError("Qwen video SFT currently requires micro-batch size 1")
-        if self.gradient_accumulation < 1 or self.epochs < 1 or self.warmup_steps < 0:
-            raise ValueError("invalid accumulation, epochs, or warmup_steps")
-        if not self.selection_resolution:
-            raise ValueError("selection_resolution must be nonempty")
+        if self.batch_size < 1 or self.gradient_accumulation < 1 or self.epochs < 1:
+            raise ValueError("invalid batch_size, accumulation, or epochs")
 
 
 @dataclass(frozen=True)
@@ -76,7 +75,7 @@ class PrefixSelection:
     """A temporal-patch endpoint selected without accessing any video frames."""
 
     last_patch: int
-    mode: str  # target | near_target | after_target | full
+    mode: str  # after_target: uniform over [target, last patch]
 
 
 @dataclass(frozen=True)
@@ -109,7 +108,7 @@ def _stable_seed(seed: int, epoch: int, example_key: str) -> int:
 
 def sample_prefix(target_pair: int, num_temporal_patches: int, *, seed: int, epoch: int,
                   example_key: str) -> PrefixSelection:
-    """Sample the agreed 40/30/20/10 multi-prefix distribution.
+    """Sample the prefix end uniformly from the target patch to the last patch of the video.
 
     ``last_patch`` is inclusive.  The caller must pass exactly
     ``(last_patch + 1) * temporal_patch`` decoded model frames to Qwen, which
@@ -118,15 +117,7 @@ def sample_prefix(target_pair: int, num_temporal_patches: int, *, seed: int, epo
     if num_temporal_patches < 1 or not 0 <= target_pair < num_temporal_patches:
         raise ValueError("target_pair must index an available temporal patch")
     rng = random.Random(_stable_seed(seed, epoch, example_key))
-    draw = rng.random()
-    if draw < 0.40:
-        return PrefixSelection(target_pair, "target")
-    if draw < 0.70:
-        return PrefixSelection(rng.randint(target_pair, min(target_pair + 5, num_temporal_patches - 1)),
-                               "near_target")
-    if draw < 0.90:
-        return PrefixSelection(rng.randint(target_pair, num_temporal_patches - 1), "after_target")
-    return PrefixSelection(num_temporal_patches - 1, "full")
+    return PrefixSelection(rng.randint(target_pair, num_temporal_patches - 1), "after_target")
 
 
 def _records_for_first_videos(path: Path, video_limit: int) -> list[Record]:
@@ -166,12 +157,15 @@ def _prefix_context(record: Record, *, data_root: Path, builder: InputBuilder, f
 
 
 def _build_sft_example(builder: InputBuilder, record: Record, frames: Any, *, fps: float) -> dict[str, Any]:
-    """Use the existing Qwen processor/chat template and append answer-only labels."""
+    """Use the existing Qwen processor/chat template and append the answer letter as the only supervised token.
+
+    No EOS follows the letter: the answer is read as log P(letter) at the assistant position (as probe_logprob in the
+    cached features), so the loss is exactly -log P(correct letter) and nothing else shares its weight."""
     inputs = builder._encode(format_prompt(record.question, record.choices), frames, fps)
     ids = inputs["input_ids"]
     tokenizer = builder.processor.tokenizer
     answer = answer_letter(record.choices, record.answers[0].answer)
-    answer_ids = tokenizer(answer + tokenizer.eos_token, add_special_tokens=False, return_tensors="pt").input_ids[0]
+    answer_ids = tokenizer(answer, add_special_tokens=False, return_tensors="pt").input_ids[0]
     answer_ids = answer_ids.to(device=ids.device, dtype=ids.dtype)
     inputs["input_ids"] = torch.cat((ids, answer_ids[None]), dim=1)
     inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
@@ -359,22 +353,32 @@ def collate_sft(examples: Sequence[Mapping[str, Any]], pad_id: int) -> dict[str,
 
 
 def masked_sft_loss(model: torch.nn.Module, batch: Mapping[str, Any]) -> torch.Tensor:
-    """Standard shifted autoregressive loss with answer-only labels."""
+    """Qwen's shifted causal-LM loss on the answer tokens, with the vocabulary projection only where it is needed.
+
+    Token j is predicted from position j - 1, so only the positions just before supervised tokens go through lm_head.
+    The language-mode forward would project every position of every sequence instead: ~4 GB of bf16 logits for 4
+    sequences of ~3500 tokens, plus their float32 copy and gradient in the loss. The value is the same.
+    """
     _validate_collated_sft_batch(batch)
-    inputs = {key: value for key, value in batch.items() if key != ANSWER_IDS_KEY}
-    # VideoStateModel language mode delegates to PEFT/Qwen and therefore uses
-    # Transformers' canonical shifted causal-LM cross entropy.
-    result = model(inputs, mode="language")
-    if not hasattr(result, "loss") or result.loss is None or not torch.isfinite(result.loss):
+    labels = batch["labels"]
+    inputs = {key: value for key, value in batch.items() if key not in (ANSWER_IDS_KEY, "labels")}
+    supervised = labels != IGNORE
+    predicting = torch.zeros_like(supervised)
+    predicting[:, :-1] = supervised[:, 1:]
+    # Both masks flatten in batch-then-position order, so features and targets stay paired.
+    hidden = model.decision_features(inputs, predicting)
+    logits = model.qwen.lm_head(hidden).float()
+    loss = torch.nn.functional.cross_entropy(logits, labels[supervised])
+    if not torch.isfinite(loss):
         raise RuntimeError("Qwen did not produce a finite language-model loss")
-    return result.loss
+    return loss
 
 
 @dataclass(frozen=True)
 class ChoiceEvaluationExample:
     """Schema-free validation interface produced by a future dataset adapter.
 
-    ``inputs_by_time`` has exactly the keys ``start``, ``target``, and ``end``.
+    ``inputs_by_time`` has exactly the keys of ``TIME_POINTS``.
     Each value is a single, processor-ready prompt/video payload without answer
     tokens. ``choice_token_ids`` holds one or more token IDs for each option.
     """
@@ -393,11 +397,30 @@ class ValidationProvider(Protocol):
         ...
 
 
-class ClevrerLoRAValidationProvider:
-    """README §11 validation partition: first 2,000 videos of ``val_group1``."""
+def split_validation_videos(records: Sequence[Record], seed: int) -> tuple[list[Record], list[Record], dict[str, Any]]:
+    """Halve the LoRA validation videos at random (seeded): one half selects the checkpoint during training, the other
+    is the test, evaluated once afterwards. All questions of a video stay in one half."""
+    by_video: dict[str, list[Record]] = {}
+    for record in records:
+        by_video.setdefault(record.video, []).append(record)
+    videos = sorted(by_video)
+    if len(videos) < 2:
+        raise ValueError("Splitting into validation and test needs at least two videos")
+    random.Random(seed).shuffle(videos)
+    half = len(videos) // 2
+    validation_videos, test_videos = sorted(videos[:half]), sorted(videos[half:])
+    validation = [record for video in validation_videos for record in by_video[video]]
+    test = [record for video in test_videos for record in by_video[video]]
+    return validation, test, {"seed": seed, "validation_videos": validation_videos, "test_videos": test_videos,
+                              "validation_questions": len(validation), "test_questions": len(test)}
 
-    def __init__(self, path: Path, *, data_root: Path, builder: InputBuilder, split: ClevrerLoRASplitConfig):
-        self.records = _records_for_first_videos(path, split.validation_videos)
+
+class ClevrerLoRAValidationProvider:
+    """Questions of one half of README §11's LoRA validation videos (the first 2,000 of ``val_group1``)."""
+
+    def __init__(self, records: Sequence[Record], *, data_root: Path, builder: InputBuilder,
+                 split: ClevrerLoRASplitConfig):
+        self.records = list(records)
         self.data_root, self.builder, self.split = Path(data_root), builder, split
 
     def iter_choice_examples(self, resolution: tuple[int, int]) -> Iterable[ChoiceEvaluationExample]:
@@ -413,7 +436,9 @@ class ClevrerLoRAValidationProvider:
                 if not token_ids:
                     raise ValueError(f"{record.id}: empty tokenization for answer letter {letter}")
                 choices.append(torch.tensor(token_ids, dtype=torch.long))
-            prefixes = {"start": 0, "target": target, "end": patches - 1}
+            answerable = sample_prefix(target, patches, seed=VALIDATION_PREFIX_SEED, epoch=0,
+                                       example_key=record.id).last_patch
+            prefixes = {"start": 0, "target": target, "answerable": answerable, "end": patches - 1}
             inputs = {
                 point: dict(self.builder._encode(
                     format_prompt(record.question, record.choices),
@@ -427,17 +452,39 @@ class ClevrerLoRAValidationProvider:
 
 
 def build_clevrer_lora_data(*, data_root: str | Path, builder: InputBuilder, split: ClevrerLoRASplitConfig,
-                            seed: int) -> tuple[DataLoader, ClevrerLoRAValidationProvider]:
-    """Build the documented LoRA train/validation partitions without a new split."""
+                            seed: int, batch_size: int = 1) \
+        -> tuple[DataLoader, ClevrerLoRAValidationProvider, dict[str, Any]]:
+    """Build the documented LoRA partitions: the training loader, the validation half of the LoRA validation videos,
+    and split information (the data settings and both video lists) for ``split.json`` of the run."""
     split.validate()
     root = Path(data_root)
     train = ClevrerLoRASFTDataset(root / split.train, data_root=root, builder=builder, split=split, seed=seed)
-    validation = ClevrerLoRAValidationProvider(root / split.validation, data_root=root, builder=builder, split=split)
+    validation_records, _, info = split_validation_videos(
+        _records_for_first_videos(root / split.validation, split.validation_videos), VALIDATION_SPLIT_SEED)
+    validation = ClevrerLoRAValidationProvider(validation_records, data_root=root, builder=builder, split=split)
     loader = DataLoader(
-        train, batch_size=1, shuffle=True, num_workers=split.num_workers,
+        train, batch_size=batch_size, shuffle=True, num_workers=split.num_workers,
         collate_fn=partial(collate_sft, pad_id=builder.processor.tokenizer.pad_token_id),
         generator=torch.Generator().manual_seed(seed), persistent_workers=False)
-    return loader, validation
+    return loader, validation, {"data": asdict(split), **info}
+
+
+def clevrer_lora_test_provider(run_dir: str | Path, *, data_root: str | Path,
+                               builder: InputBuilder) -> tuple[ClevrerLoRAValidationProvider, ClevrerLoRASplitConfig]:
+    """The test half recorded in ``split.json`` of a training run, with the data settings of that run."""
+    info = json.loads((Path(run_dir) / "split.json").read_text(encoding="utf-8"))
+    data = dict(info["data"])
+    data["train_frame_size"] = tuple(data["train_frame_size"])
+    split = ClevrerLoRASplitConfig(**data)
+    split.validate()
+    root = Path(data_root)
+    test_videos = set(info["test_videos"])
+    records = [record for record in _records_for_first_videos(root / split.validation, split.validation_videos)
+               if record.video in test_videos]
+    if len({record.video for record in records}) != len(test_videos) or len(records) != info["test_questions"]:
+        raise ValueError(f"{root / split.validation} no longer matches split.json of {run_dir}: "
+                         f"{len(records)} test questions, expected {info['test_questions']}")
+    return ClevrerLoRAValidationProvider(records, data_root=root, builder=builder, split=split), split
 
 
 def _move_inputs(inputs: Mapping[str, Any], device: torch.device | str) -> dict[str, Any]:
@@ -503,7 +550,7 @@ def evaluate_choice_examples(model: torch.nn.Module, examples: Iterable[ChoiceEv
     try:
         for example in examples:
             if set(example.inputs_by_time) != set(TIME_POINTS):
-                raise ValueError("inputs_by_time must contain exactly start, target, end")
+                raise ValueError(f"inputs_by_time must contain exactly {', '.join(TIME_POINTS)}")
             if not 0 <= example.answer_index < len(example.choice_token_ids):
                 raise ValueError(f"{example.record_id}: invalid answer_index")
             row = {"record_id": example.record_id, "family": example.family,
@@ -553,10 +600,17 @@ def save_lora_adapter(model: torch.nn.Module, path: str | Path, *, metadata: Map
     return path
 
 
-def _lr_factor(step: int, warmup: int, total: int) -> float:
-    if step < warmup:
-        return (step + 1) / max(1, warmup)
-    return 0.5 * (1 + math.cos(math.pi * min(1.0, (step - warmup) / max(1, total - warmup))))
+def load_lora_adapter(model: torch.nn.Module, path: str | Path) -> torch.nn.Module:
+    """Load an adapter written by :func:`save_lora_adapter` into a model built with the same LoRA settings."""
+    from peft import get_peft_model_state_dict, set_peft_model_state_dict
+    from safetensors.torch import load_file
+
+    weights = load_file(str(Path(path) / "adapter_model.safetensors"))
+    expected = get_peft_model_state_dict(model.backbone)
+    if expected.keys() != weights.keys():
+        raise ValueError(f"Adapter {path} does not match the model's LoRA configuration")
+    set_peft_model_state_dict(model.backbone, weights)
+    return model
 
 
 def _set_epoch(loader: DataLoader, epoch: int) -> None:
@@ -598,10 +652,9 @@ def _accuracy_deltas(validation: Mapping[str, Any], baseline: Mapping[str, Any])
 
 
 def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer: torch.optim.Optimizer,
-                 scheduler: torch.optim.lr_scheduler.LRScheduler, gradient_accumulation: int,
-                 grad_clip: float, parameters: Sequence[torch.nn.Parameter],
-                 device: torch.device | str, epoch: int = 1, global_step_start: int = 0) \
-        -> tuple[float, int, list[dict[str, Any]]]:
+                 gradient_accumulation: int, grad_clip: float, parameters: Sequence[torch.nn.Parameter],
+                 device: torch.device | str, epoch: int = 1, global_step_start: int = 0,
+                 loss_fn=masked_sft_loss) -> tuple[float, int, list[dict[str, Any]]]:
     """Run one epoch, normalizing every accumulation window by its actual size."""
     losses: list[float] = []
     steps = 0
@@ -615,7 +668,7 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
         window_start = ((batch_index - 1) // gradient_accumulation) * gradient_accumulation
         window_size = min(gradient_accumulation, batches - window_start)
         moved = _move_inputs(batch, device)
-        loss = masked_sft_loss(model, moved)
+        loss = loss_fn(model, moved)
         (loss / window_size).backward()
         value = float(loss.detach().cpu())
         losses.append(value)
@@ -626,7 +679,6 @@ def _train_epoch(model: torch.nn.Module, train_loader: DataLoader, *, optimizer:
         gradient_norm = float(torch.nn.utils.clip_grad_norm_(parameters, grad_clip))
         learning_rate = float(optimizer.param_groups[0]["lr"])
         optimizer.step()
-        scheduler.step()
         optimizer.zero_grad(set_to_none=True)
         steps += 1
         step_records.append({
@@ -663,12 +715,14 @@ def _print_epoch_summary(epoch: int, total_epochs: int, metrics: Mapping[str, An
 def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoRASFTConfig, *,
                    output_dir: str | Path, device: torch.device | str,
                    validation_provider: ValidationProvider | None = None,
-                   validation_resolutions: Sequence[tuple[int, int]] = ((252, 168), (504, 336))) -> Path:
+                   validation_resolution: tuple[int, int] = (252, 168),
+                   split_info: Mapping[str, Any] | None = None) -> Path:
     """Train an externally supplied prepared dataset and checkpoint adapters.
 
     The future dataset owns loading, temporal conversion, and video preprocessing.
     It must yield examples accepted by :func:`collate_sft`; if it supports
     ``set_epoch(epoch)``, multi-prefix sampling remains reproducible per epoch.
+    Validation runs before training and after every epoch at one resolution, ``(width, height)``.
     """
     config.validate()
     configure_gradient_checkpointing(model, enabled=config.gradient_checkpointing)
@@ -677,15 +731,18 @@ def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoR
         raise ValueError("train_loader must contain at least one prepared SFT batch")
     output_dir = _prepare_output_dir(output_dir, overwrite=config.overwrite)
     (output_dir / "sft_config.json").write_text(json.dumps(asdict(config), indent=2) + "\n", encoding="utf-8")
+    # What scripts/evaluate_lora_sft.py needs to rebuild the model and the test half of the run.
+    if hasattr(model, "config") and hasattr(model.config, "save"):
+        model.config.save(output_dir / "model.yaml")
+    if split_info is not None:
+        (output_dir / "split.json").write_text(json.dumps(split_info, indent=2) + "\n", encoding="utf-8")
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer_args: dict[str, Any] = {"lr": config.learning_rate, "betas": config.betas,
                                       "weight_decay": config.weight_decay}
     if torch.cuda.is_available() and torch.device(device).type == "cuda":
         optimizer_args["fused"] = True
     optimizer = torch.optim.AdamW(parameters, **optimizer_args)
-    total_steps = config.epochs * math.ceil(len(train_loader) / config.gradient_accumulation)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda step: _lr_factor(step, config.warmup_steps, total_steps))
+    resolution = f"{validation_resolution[0]}x{validation_resolution[1]}"
     metrics_file = output_dir / "validation_metrics.jsonl"
     steps_file = output_dir / "train_steps.jsonl"
     best_epoch: int | None = None
@@ -698,28 +755,27 @@ def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoR
         nonlocal baseline, best_epoch, best_score
         if validation_provider is None:
             return
-        validation = evaluate_validation(model, validation_provider, resolutions=validation_resolutions, device=device)
+        validation = evaluate_validation(model, validation_provider, resolutions=(validation_resolution,),
+                                         device=device)
         no_predictions = {key: {k: v for k, v in value.items() if k != "predictions"}
                           for key, value in validation.items()}
         if baseline is None:
             baseline = no_predictions
         validation_with_delta = _accuracy_deltas(no_predictions, baseline)
-        if config.selection_resolution not in validation_with_delta:
-            raise ValueError(f"selection_resolution {config.selection_resolution} was not evaluated")
-        score = validation_with_delta[config.selection_resolution][SELECTION_METRIC]
+        score = validation_with_delta[resolution][SELECTION_METRIC]
         is_best = _is_new_best(score, best_score)
         if is_best:
             best_epoch, best_score = epoch, score
             save_lora_adapter(model, output_dir / "best", metadata={
                 "epoch": epoch, "best_epoch": best_epoch, "best_score": best_score,
-                "selection_metric": SELECTION_METRIC, "selection_resolution": config.selection_resolution,
+                "selection_metric": SELECTION_METRIC, "selection_resolution": resolution,
                 "is_best_checkpoint": True,
             })
         metrics = {
             "epoch": epoch, "train_loss": train_loss, "learning_rate": float(optimizer.param_groups[0]["lr"]),
             "optimizer_steps": optimizer_steps, "epoch_duration_seconds": epoch_duration_seconds,
             "peak_gpu_memory_gb": peak_gpu_memory_gb, "selection_metric": SELECTION_METRIC,
-            "selection_resolution": config.selection_resolution, "best_epoch": best_epoch,
+            "selection_resolution": resolution, "best_epoch": best_epoch,
             "best_score": best_score, "is_best_checkpoint": is_best, "validation": validation_with_delta,
         }
         with metrics_file.open("a", encoding="utf-8") as file:
@@ -737,7 +793,7 @@ def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoR
             torch.cuda.reset_peak_memory_stats(device)
         started = time.perf_counter()
         mean_loss, epoch_steps, step_records = _train_epoch(
-            model, train_loader, optimizer=optimizer, scheduler=scheduler,
+            model, train_loader, optimizer=optimizer,
             gradient_accumulation=config.gradient_accumulation, grad_clip=config.grad_clip,
             parameters=parameters, device=device, epoch=epoch, global_step_start=global_step)
         global_step += epoch_steps
@@ -748,5 +804,5 @@ def train_lora_sft(model: torch.nn.Module, train_loader: DataLoader, config: LoR
         evaluate_and_save(epoch, train_loss=mean_loss, optimizer_steps=epoch_steps,
                           epoch_duration_seconds=time.perf_counter() - started, peak_gpu_memory_gb=peak)
         save_lora_adapter(model, output_dir / "last", metadata={"epoch": epoch,
-                          "train_loss": mean_loss, "lr": scheduler.get_last_lr()[0]})
+                          "train_loss": mean_loss, "lr": config.learning_rate})
     return output_dir / "best" if (output_dir / "best").exists() else output_dir / "last"
