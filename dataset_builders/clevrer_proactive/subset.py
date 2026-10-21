@@ -17,11 +17,14 @@ videos, for fine-tuning Qwen with LoRA; <name>_features.jsonl, the second half, 
 heads. All questions of a video stay in one half, so a fine-tuned model never gives features of a video it learned.
 
     python -m dataset_builders.clevrer_proactive.subset   # -> train_group1.*, val_group1.*, *_lora.jsonl, *_features.jsonl
+    python -m dataset_builders.clevrer_proactive.subset --halves-only   # only the halves, from the group-1 .jsonl
+                                                                        # (when the *_balanced.json are not there)
 """
+import argparse
 import json
 import re
 
-from online_vllm.data.schema import save_jsonl
+from online_vllm.data.schema import load_jsonl, save_jsonl
 
 from .balance import stats
 from .export import convert
@@ -53,8 +56,23 @@ def halves(records):
     return [r for r in records if r.video in first], [r for r in records if r.video not in first]
 
 
+def write_halves(name, records):
+    for half, part in zip(HALVES, halves(records)):
+        save_jsonl(part, PROCESSED / f"{name}_{half}.jsonl")
+        print(f"  {half}: {len({r.video for r in part})} videos, {len(part)} questions -> {name}_{half}.jsonl")
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--halves-only", action="store_true",
+                        help="only split the existing <name>.jsonl into halves, without the *_balanced.json")
+    args = parser.parse_args()
     for split, name in SPLITS.items():
+        if args.halves_only:
+            records = list(load_jsonl(PROCESSED / f"{name}.jsonl"))
+            print(f"{name}.jsonl: {len(records)} questions")
+            write_halves(name, records)
+            continue
         qs = json.loads((PROCESSED / f"{split}_balanced.json").read_text(encoding="utf-8"))
         kept = [q for q in qs if keep(q)]
         stats(kept, name)
@@ -64,9 +82,7 @@ def main():
             r.check()
         save_jsonl(records, PROCESSED / f"{name}.jsonl")
         print(f"{len(qs)} -> {len(kept)} questions -> {PROCESSED / name}.json, .jsonl")
-        for half, part in zip(HALVES, halves(records)):
-            save_jsonl(part, PROCESSED / f"{name}_{half}.jsonl")
-            print(f"  {half}: {len({r.video for r in part})} videos, {len(part)} questions -> {name}_{half}.jsonl")
+        write_halves(name, records)
 
 
 if __name__ == "__main__":
