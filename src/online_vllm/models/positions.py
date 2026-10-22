@@ -5,8 +5,9 @@ positions (the temporal index is a constant, and `int(second_per_grid_ts)` trunc
 only by their order in causal attention. The original Qwen2.5-VL indexes time as
     t = floor(patch index * seconds per patch * tokens_per_second)
 (tokens_per_second = 2: one step per 0.5 s), h and w as the merged grid row and column, all offset by the position
-reached so far; text after a visual block continues from its largest position + 1. `install` puts this back on a
-loaded model, so every forward pass, generate included, uses it.
+reached so far; text after a visual block continues from its largest position + 1. An image has no time axis: all its
+tokens share t = the position reached so far (transformers 5.3 doubles that t, which shifts every image of MMDuet2's
+turns, data/turns.py). `install` puts this back on a loaded model, so every forward pass, generate included, uses it.
 """
 import types
 

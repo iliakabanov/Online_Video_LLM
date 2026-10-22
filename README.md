@@ -8,6 +8,8 @@
 
 Архитектура Qwen2.5-VL-3B + LoRA + MLP состояния, конфиг и smoke-тесты: [models/README.md](src/online_vllm/models/README.md).
 Разметка, обучающая последовательность и запуск обучения: [train/README.md](src/online_vllm/train/README.md).
+Оценка без дообучения: Qwen2.5-VL-3B офлайн и онлайн-модель MMDuet2 на 500 вопросах —
+[eval/ZERO_SHOT.md](src/online_vllm/eval/ZERO_SHOT.md).
 
 ## Датасеты
 

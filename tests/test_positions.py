@@ -29,6 +29,18 @@ def test_time_grows_with_the_patch(qwen):
     assert pos[0, 0].tolist() == [0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 6, 7]
 
 
+def test_images_keep_their_start_time(qwen):
+    # MMDuet2's turns (data/turns.py): every frame is an image. All its tokens share t = the position reached so far,
+    # as in the original Qwen2.5-VL (transformers 5.3 doubles it); text resumes after the largest position.
+    ids = torch.tensor([[5, 6, 7, 62] + [60] * 2 + [63, 62] + [60] * 2 + [63, 8]])
+    types = (ids == 60).long()
+    grids = torch.tensor([[1, 2, 4], [1, 2, 4]])
+    pos, _ = qwen.get_rope_index(ids, types, image_grid_thw=grids)
+    assert pos[0, 0].tolist() == [0, 1, 2, 3, 4, 4, 6, 7, 8, 8, 10, 11]
+    assert pos[1, 0].tolist() == [0, 1, 2, 3, 4, 4, 6, 7, 8, 8, 10, 11]
+    assert pos[2, 0].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+
 def test_padding_is_skipped(qwen):
     ids = torch.cat([torch.zeros(1, 2, dtype=torch.long), IDS], 1)
     mask = torch.cat([torch.zeros(1, 2, dtype=torch.long), torch.ones_like(IDS)], 1)
