@@ -18,6 +18,7 @@ DEVICE="${DEVICE:-cuda}"
 OVERWRITE="${OVERWRITE:-0}"
 TAG_MODE="${TAG_MODE:-hard}"
 MODE="${MODE:-}"
+UHEAD_CONFIG_PATH="${UHEAD_CONFIG_PATH:-$ROOT/configs/uhead/default.yaml}"
 
 run_experiment() {
   local experiment_id="$1" architecture="$2"; shift 2
@@ -27,8 +28,10 @@ run_experiment() {
   case "$architecture" in
     mlp) detector="mlp"; model_name="statehead" ;;
     transformer) detector="transformer"; model_name="uhead" ;;
+    compact) detector="compact"; model_name="uhead" ;;
     *) echo "Неизвестная архитектура: $architecture" >&2; return 2 ;;
   esac
+  [[ -f "$UHEAD_CONFIG_PATH" ]] || { echo "UHead config not found: $UHEAD_CONFIG_PATH" >&2; return 2; }
   [[ "$DATA_ROOT" != "/PATH/TO/DATA" && "$TRAIN_FEATURES" != "/PATH/TO/TRAIN_FEATURES" && "$VAL_FEATURES" != "/PATH/TO/VAL_FEATURES" ]] || {
     echo "Замените DATA_ROOT, TRAIN_FEATURES и VAL_FEATURES перед запуском." >&2; return 2; }
   # adapter есть в meta.json только у признаков модели с LoRA; train и eval сверяет между собой uhead.train.
@@ -55,7 +58,8 @@ PY
   train_config="$(mktemp)"; uhead_config="$(mktemp)"
   trap 'rm -f "$train_config" "$uhead_config"' RETURN
   ROOT="$ROOT" TRAIN_FEATURES="$TRAIN_FEATURES" VAL_FEATURES="$VAL_FEATURES" \
-    FEATURE_GROUPS="${groups[*]}" DETECTOR="$detector" TRAIN_CONFIG="$train_config" UHEAD_CONFIG="$uhead_config" python - <<'PY'
+    FEATURE_GROUPS="${groups[*]}" DETECTOR="$detector" TRAIN_CONFIG="$train_config" UHEAD_CONFIG="$uhead_config" \
+    UHEAD_CONFIG_PATH="$UHEAD_CONFIG_PATH" python - <<'PY'
 import os
 from pathlib import Path
 import yaml
@@ -65,7 +69,7 @@ train = yaml.safe_load((root / "configs/train/group1.yaml").read_text(encoding="
 train["features"]["train"] = os.environ["TRAIN_FEATURES"]
 train["features"]["eval"] = os.environ["VAL_FEATURES"]
 train["seed"] = 0
-uhead = yaml.safe_load((root / "configs/uhead/default.yaml").read_text(encoding="utf-8"))
+uhead = yaml.safe_load(Path(os.environ["UHEAD_CONFIG_PATH"]).read_text(encoding="utf-8"))
 uhead["groups"] = os.environ["FEATURE_GROUPS"].split()
 uhead["temporal_detector"] = os.environ["DETECTOR"]
 Path(os.environ["TRAIN_CONFIG"]).write_text(yaml.safe_dump(train, sort_keys=False), encoding="utf-8")
