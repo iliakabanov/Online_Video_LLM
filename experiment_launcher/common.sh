@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Общий запуск: обучение cached-feature detector и метрики на validation-половине VAL_FEATURES при каждом пороге
-# (eval.thresholds в configs/train/group1.yaml). В корне репозитория:
-#   checkpoints/<arch>/<id>/  веса и всё для их загрузки и оценки: best.pt, last.pt, конфиги, split.json (не в git)
-#   results/<arch>/<id>/      метрики и предсказания: results.json, metrics.jsonl, predictions_validation.json,
-#                             run_config.json
+# (eval.thresholds в configs/train/group1.yaml). MODE — чьи признаки: original (исходная Qwen) или lora (Qwen с
+# адаптером); сверяется с meta.json признаков. В корне репозитория:
+#   checkpoints/<mode>/<arch>/<id>/  веса и всё для их загрузки и оценки: best.pt, last.pt, конфиги, split.json (не в git)
+#   results/<mode>/<arch>/<id>/      метрики и предсказания: results.json, metrics.jsonl, predictions_validation.json,
+#                                    run_config.json
 # Test-половина оценивается отдельно, с выбранным порогом:
-#   PYTHONPATH=src python -m uhead.evaluate --run checkpoints/<arch>/<id> --results results/<arch>/<id> \
+#   PYTHONPATH=src python -m uhead.evaluate --run checkpoints/<mode>/<arch>/<id> --results results/<mode>/<arch>/<id> \
 #     --threshold <tau> --data-root "$DATA_ROOT"
 set -euo pipefail
 
@@ -16,11 +17,13 @@ VAL_FEATURES="${VAL_FEATURES:-/PATH/TO/VAL_FEATURES}"
 DEVICE="${DEVICE:-cuda}"
 OVERWRITE="${OVERWRITE:-0}"
 TAG_MODE="${TAG_MODE:-hard}"
+MODE="${MODE:-}"
 
 run_experiment() {
   local experiment_id="$1" architecture="$2"; shift 2
   local groups=("$@") detector model_name
   case "$TAG_MODE" in hard|step|sigmoid|gaussian) ;; *) echo "Unknown tag mode: $TAG_MODE" >&2; return 2 ;; esac
+  case "$MODE" in original|lora) ;; *) echo "Задайте MODE=original или MODE=lora (сейчас: '$MODE')." >&2; return 2 ;; esac
   case "$architecture" in
     mlp) detector="mlp"; model_name="statehead" ;;
     transformer) detector="transformer"; model_name="uhead" ;;
@@ -28,9 +31,20 @@ run_experiment() {
   esac
   [[ "$DATA_ROOT" != "/PATH/TO/DATA" && "$TRAIN_FEATURES" != "/PATH/TO/TRAIN_FEATURES" && "$VAL_FEATURES" != "/PATH/TO/VAL_FEATURES" ]] || {
     echo "Замените DATA_ROOT, TRAIN_FEATURES и VAL_FEATURES перед запуском." >&2; return 2; }
+  # adapter есть в meta.json только у признаков модели с LoRA; train и eval сверяет между собой uhead.train.
+  local features
+  for features in "$TRAIN_FEATURES" "$VAL_FEATURES"; do
+    MODE="$MODE" META="$features/meta.json" python - <<'PY' || return 2
+import json, os, sys
+mode, meta = os.environ["MODE"], os.environ["META"]
+found = "lora" if "adapter" in json.load(open(meta, encoding="utf-8")) else "original"
+if found != mode:
+    sys.exit(f"MODE={mode}, но признаки {meta} сняты моделью {found}.")
+PY
+  done
 
-  local checkpoint_dir="$ROOT/checkpoints/$architecture/$experiment_id"
-  local result_dir="$ROOT/results/$architecture/$experiment_id"
+  local checkpoint_dir="$ROOT/checkpoints/$MODE/$architecture/$experiment_id"
+  local result_dir="$ROOT/results/$MODE/$architecture/$experiment_id"
   local train_config uhead_config
   if { [[ -d "$checkpoint_dir" ]] && [[ -n "$(find "$checkpoint_dir" -mindepth 1 -print -quit)" ]]; } || \
      { [[ -d "$result_dir" ]] && [[ -n "$(find "$result_dir" -mindepth 1 -print -quit)" ]]; }; then
@@ -62,14 +76,14 @@ PY
     --train "$train_config" --data-root "$DATA_ROOT" --output "$checkpoint_dir" --results "$result_dir" \
     --device "$DEVICE" --flat-output --overwrite
   ROOT="$ROOT" ARCHITECTURE="$architecture" EXPERIMENT_ID="$experiment_id" FEATURE_GROUPS="${groups[*]}" TAG_MODE="$TAG_MODE" \
-    CHECKPOINT="$checkpoint_dir" RESULT="$result_dir" python - <<'PY'
+    MODE="$MODE" CHECKPOINT="$checkpoint_dir" RESULT="$result_dir" python - <<'PY'
 import json, os
 from pathlib import Path
 checkpoint = Path(os.environ["CHECKPOINT"])
 config = json.loads(checkpoint.joinpath("experiment.json").read_text(encoding="utf-8"))
 results = json.loads(Path(os.environ["RESULT"]).joinpath("results.json").read_text(encoding="utf-8"))
 config.update({
-    "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
+    "mode": os.environ["MODE"], "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
     "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": os.environ["TAG_MODE"], "seed": 0,
     "checkpoint_path": str(checkpoint / "best.pt"), "best_epoch": results["best_epoch"],
 })

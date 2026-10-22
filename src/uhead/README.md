@@ -81,6 +81,6 @@ PYTHONPATH=src python -m online_vllm.eval.readiness_plot --predictions results/<
     --output results/<arch>/<id>/readiness_curves.json --plot results/<arch>/<id>/readiness_curves.png [--taus 0.5 0.7 0.9]
 ```
 
-Веса и результаты можно разнести по разным каталогам: `--output` получает веса, конфиги и `split.json`, а `--results` (у `uhead.train` и `uhead.evaluate`) — `metrics.jsonl`, `results.json` и предсказания. Без `--results` всё пишется в `--output`. Так делает `experiment_launcher/common.sh`: веса в `checkpoints/<arch>/<id>/` (не в git), результаты в `results/<arch>/<id>/` в корне репозитория.
+Веса и результаты можно разнести по разным каталогам: `--output` получает веса, конфиги и `split.json`, а `--results` (у `uhead.train` и `uhead.evaluate`) — `metrics.jsonl`, `results.json` и предсказания. Без `--results` всё пишется в `--output`. Так делает `experiment_launcher/common.sh`: веса в `checkpoints/<mode>/<arch>/<id>/` (не в git), результаты в `results/<mode>/<arch>/<id>/` в корне репозитория. `MODE=original` или `MODE=lora` обязателен: чьи признаки (исходной Qwen или Qwen с адаптером), сверяется с `meta.json` признаков.
 
 В каталоге запуска лежат `best.pt` и `last.pt` (веса, включая normalizer buffers), `uhead.yaml`, `train.yaml`, `tags.json`, `experiment.json`. Загрузка: `from uhead.train import load_checkpoint; model = load_checkpoint(".../hard")` (берётся `best.pt`; `last.pt` — через `filename="last.pt"`); `tags = model.tag_settings`.
