@@ -1,0 +1,189 @@
+"""Уверенность головы готовности и точность ответа Qwen: по времени и друг против друга, без признаков и без Qwen.
+
+Вход — predictions JSON в формате online_vllm.eval.export (predictions_validation.json из uhead.train,
+predictions_test_*.json из uhead.evaluate): P(готов) и верность ответа Qwen по пробе на каждой паре каждого вопроса.
+
+- time: по сдвигу пары относительно целевой — медиана, среднее и 10–90-й перцентили P(готов) и точность ответа Qwen
+  на той же паре (одна пара на вопрос, поэтому каждый вопрос весит одинаково);
+- bins: точки (вопрос, пара) по бинам P(готов) равной ширины. Точность, средняя уверенность и средний сдвиг бина
+  считаются с весом 1 / (число пар вопроса в бине): каждый вопрос, попавший в бин, весит в нём ровно 1. Иначе бин
+  заполняют вопросы, у которых в нём больше всего пар (поздняя цель — много пар до неё), а не типичный вопрос.
+  Интервал — ±1,96·√(p(1−p)/n) по числу вопросов n.
+- levels: угадывание (1 / число вариантов, нужны записи вопросов --records) и точность на последней паре видео.
+
+PYTHONPATH=src python -m online_vllm.eval.confidence_plot --predictions results/lora/mlp/01_lm/predictions_validation.json \
+    --output results/lora/mlp/01_lm/confidence_accuracy.json --plot results/lora/mlp/01_lm/confidence_accuracy.png
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+
+from .answers import GRID, INK, INK_2, MUTED, SERIES
+from .readiness_plot import ReadinessTrace, _curve, _style, load_traces
+
+# Диверсирующая шкала сдвига: синий — до целевой пары, красный — после, серый — на ней.
+EARLY, NEUTRAL, LATE = "#2a78d6", "#f0efec", "#e34948"
+DEFAULT_RECORDS = "processed/clevrer_proactive/val_group1_features.jsonl"
+
+
+def chance_by_question(records_path: Path) -> dict[str, float]:
+    """1 / число вариантов по id вопроса."""
+    from ..data.schema import load_jsonl
+    return {record.id: 1 / len(record.choices) for record in load_jsonl(records_path)}
+
+
+def confidence_bins(traces: list[ReadinessTrace], bins: int = 10) -> list[dict]:
+    """Бины P(готов) равной ширины; точность, уверенность и сдвиг с равным весом вопросов внутри бина."""
+    if any(t.answer_correct is None for t in traces):
+        raise ValueError("Нужна верность ответа Qwen (answer_correct) на каждой паре")
+    probability = np.concatenate([t.probabilities for t in traces])
+    correct = np.concatenate([t.answer_correct for t in traces]).astype(np.float64)
+    offset = np.concatenate([np.arange(len(t.probabilities)) - t.target_pair for t in traces]).astype(np.float64)
+    question = np.concatenate([np.full(len(t.probabilities), i) for i, t in enumerate(traces)])
+    index = np.minimum((probability * bins).astype(int), bins - 1)
+    result = []
+    for b in range(bins):
+        members = index == b
+        if not members.any():
+            result.append({"low": b / bins, "high": (b + 1) / bins, "questions": 0, "pairs": 0})
+            continue
+        _, inverse, counts = np.unique(question[members], return_inverse=True, return_counts=True)
+        weights = 1 / counts[inverse]
+        accuracy = float(np.average(correct[members], weights=weights))
+        n = len(counts)
+        result.append({"low": b / bins, "high": (b + 1) / bins, "questions": n, "pairs": int(members.sum()),
+                       "confidence": float(np.average(probability[members], weights=weights)),
+                       "accuracy": accuracy, "accuracy_ci": float(1.96 * np.sqrt(accuracy * (1 - accuracy) / n)),
+                       "offset": float(np.average(offset[members], weights=weights))})
+    return result
+
+
+def confidence_accuracy(traces: list[ReadinessTrace], offsets=range(-30, 31), bins: int = 10,
+                        chance: dict[str, float] | None = None) -> dict:
+    levels = {"end_of_video": float(np.mean([t.answer_correct[-1] for t in traces])), "chance": None}
+    if chance is not None:
+        missing = [t.record_id for t in traces if t.record_id not in chance]
+        if missing:
+            raise ValueError(f"Нет записей для {len(missing)} вопросов, например {missing[0]}")
+        levels["chance"] = float(np.mean([chance[t.record_id] for t in traces]))
+    return {"questions": len(traces), "levels": levels, "time": _curve(traces, list(offsets)),
+            "bins": confidence_bins(traces, bins)}
+
+
+def _level(ax, value: float | None, text: str, x: float, ha: str = "right"):
+    if value is None:
+        return
+    ax.axhline(value, color=MUTED, linewidth=1, linestyle=(0, (4, 3)), zorder=1)
+    ax.text(x, value, f" {text} ", color=INK_2, fontsize=9, va="bottom", ha=ha)
+
+
+def plot_confidence_accuracy(result: dict, path: str | Path, title: str | None = None):
+    """PNG из двух графиков: P(готов) и точность по сдвигу от целевой пары; точность по бинам P(готов)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+    from matplotlib.ticker import PercentFormatter
+
+    fig, (time_ax, bins_ax) = plt.subplots(1, 2, figsize=(14, 5.6), constrained_layout=True)
+    levels = result["levels"]
+
+    points = [row for row in result["time"] if row["count"]]
+    x = [row["offset"] for row in points]
+    time_ax.fill_between(x, [row["q10"] for row in points], [row["q90"] for row in points], color=SERIES[0],
+                         alpha=0.18, linewidth=0, label="P(готов), 10–90-й перцентили", zorder=2)
+    time_ax.plot(x, [row["median"] for row in points], color=SERIES[0], linewidth=2, label="P(готов), медиана",
+                 zorder=3)
+    time_ax.plot(x, [row["mean"] for row in points], color=SERIES[0], linewidth=1.2, linestyle=(0, (4, 3)),
+                 label="P(готов), среднее", zorder=3)
+    accuracy = [(row["offset"], row["answer_accuracy"]) for row in points if row["answer_accuracy"] is not None]
+    time_ax.plot(*zip(*accuracy), color=SERIES[1], linewidth=2, label="точность ответа Qwen", zorder=3)
+    _level(time_ax, levels["chance"], "угадывание", x[-1])
+    time_ax.axvline(0, color=MUTED, linewidth=1, zorder=1)
+    time_ax.text(0, 1.0, " целевая пара", color=INK_2, fontsize=9, va="top", ha="left",
+                 transform=time_ax.get_xaxis_transform())
+    time_ax.set_ylim(0, 1.1)
+    time_ax.set_yticks(np.linspace(0, 1, 6))
+    time_ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+    time_ax.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left", bbox_to_anchor=(0, 0.92))
+    _style(time_ax, "Уверенность головы и точность ответа во времени",
+           "сдвиг относительно целевой пары, пары (1 пара = 0,08 с)")
+
+    rows = [row for row in result["bins"] if row["questions"]]
+    conf = np.array([row["confidence"] for row in rows])
+    acc = np.array([row["accuracy"] for row in rows])
+    bins_ax.plot([0, 1], [0, 1], color=GRID, linewidth=1, zorder=1)
+    # Подписи слева: справа вверху лежат точки самых уверенных бинов.
+    _level(bins_ax, levels["chance"], "угадывание", 0.0, "left")
+    _level(bins_ax, levels["end_of_video"], "точность в конце видео", 0.0, "left")
+    bins_ax.errorbar(conf, acc, yerr=[row["accuracy_ci"] for row in rows], color=SERIES[1], linewidth=2,
+                     elinewidth=1, capsize=0, zorder=3, label="точность ответа Qwen, вопросы с равным весом")
+    span = max(1.0, max(abs(row["offset"]) for row in rows))
+    cmap = LinearSegmentedColormap.from_list("offset", [EARLY, NEUTRAL, LATE])
+    dots = bins_ax.scatter(conf, acc, c=[row["offset"] for row in rows], cmap=cmap,
+                           norm=TwoSlopeNorm(0, -span, span), s=70, edgecolors=INK_2, linewidths=1, zorder=4)
+    for row in rows:
+        bins_ax.annotate(f"{row['questions']}", (row["confidence"], row["accuracy"]), xytext=(0, -14),
+                         textcoords="offset points", ha="center", color=MUTED, fontsize=8)
+    colorbar = fig.colorbar(dots, ax=bins_ax, pad=0.01, fraction=0.04)
+    colorbar.set_label("средний сдвиг от целевой пары в бине, пары", color=INK_2, fontsize=9)
+    colorbar.ax.tick_params(colors=INK_2, labelsize=8)
+    colorbar.outline.set_visible(False)
+    bins_ax.set_xlim(-0.02, 1.02)
+    bins_ax.set_ylim(0, 1.05)
+    for axis in (bins_ax.xaxis, bins_ax.yaxis):
+        axis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+    bins_ax.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
+    _style(bins_ax, f"Точность по бинам уверенности (ширина {rows[0]['high'] - rows[0]['low']:.2g}; "
+                    "под точкой — число вопросов)", "уверенность головы P(готов), среднее в бине")
+
+    fig.suptitle(title or f"{result['questions']} вопросов", color=INK_2, fontsize=10, x=0.01, ha="left")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, facecolor="white")
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--predictions", required=True, help="predictions JSON (eval/export.py, uhead.train)")
+    parser.add_argument("--output", required=True, help="JSON с кривыми и бинами")
+    parser.add_argument("--plot", help="PNG с графиками")
+    parser.add_argument("--offsets", default="-30:30", help="диапазон сдвигов относительно целевой пары, a:b")
+    parser.add_argument("--bins", type=int, default=10, help="число бинов P(готов) равной ширины")
+    parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", "data"))
+    parser.add_argument("--records", default=DEFAULT_RECORDS,
+                        help="записи вопросов (число вариантов для угадывания), относительно --data-root; "
+                             "если файла нет, уровень угадывания не рисуется")
+    args = parser.parse_args()
+    if args.bins < 2:
+        parser.error("--bins: не меньше 2")
+    payload = json.loads(Path(args.predictions).read_text(encoding="utf-8"))
+    records = Path(args.data_root) / args.records
+    chance = chance_by_question(records) if records.exists() else None
+    if chance is None:
+        print(f"Нет {records}: уровень угадывания не рисуется")
+    start, stop = (int(v) for v in args.offsets.split(":"))
+    result = {"predictions": str(args.predictions), "metadata": payload.get("metadata", {}),
+              **confidence_accuracy(load_traces(payload), range(start, stop + 1), args.bins, chance)}
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    for row in result["bins"]:
+        if row["questions"]:
+            print(f"P ∈ [{row['low']:.2f}, {row['high']:.2f}): вопросов {row['questions']}, "
+                  f"точность {row['accuracy']:.3f} ± {row['accuracy_ci']:.3f}, сдвиг {row['offset']:+.1f}")
+    if args.plot:
+        metadata = result["metadata"]
+        title = (f"{result['questions']} вопросов · {metadata.get('model', '')} · {metadata.get('tags', '')} · "
+                 f"{metadata.get('split', '')} · {Path(args.predictions).parent.name}")
+        plot_confidence_accuracy(result, args.plot, title)
+
+
+if __name__ == "__main__":
+    main()
