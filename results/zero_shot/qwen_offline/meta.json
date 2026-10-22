@@ -1,0 +1,16 @@
+{
+  "system": "qwen_offline",
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+  "processor": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "dtype": "bfloat16",
+  "size": [
+    252,
+    168
+  ],
+  "stride": 1,
+  "frames_per_pair": 2,
+  "seed": 0,
+  "questions_file": "processed/clevrer_proactive/val_group1_features_eval500.jsonl",
+  "questions": 500
+}
