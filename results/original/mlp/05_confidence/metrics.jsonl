@@ -1,0 +1,21 @@
+{"step": 151, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 1, "train_loss": 0.606547415651233, "lr": 0.001, "eval_loss": 0.5834128612502685}
+{"step": 302, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 2, "train_loss": 0.5899054534387904, "lr": 0.001, "eval_loss": 0.5797803192277841}
+{"step": 453, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 3, "train_loss": 0.5849267398284761, "lr": 0.001, "eval_loss": 0.5826354508392638}
+{"step": 604, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 4, "train_loss": 0.5816380235533051, "lr": 0.001, "eval_loss": 0.5817611887707689}
+{"step": 755, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 5, "train_loss": 0.5802065836672752, "lr": 0.001, "eval_loss": 0.5752076231633707}
+{"step": 906, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 6, "train_loss": 0.5786716612364282, "lr": 0.001, "eval_loss": 0.5869651880559711}
+{"step": 1057, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 7, "train_loss": 0.578311063595955, "lr": 0.001, "eval_loss": 0.5742328257299483}
+{"step": 1208, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 8, "train_loss": 0.5755227563396984, "lr": 0.001, "eval_loss": 0.5782278020200031}
+{"step": 1359, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 9, "train_loss": 0.5758203477259504, "lr": 0.001, "eval_loss": 0.5776474621438761}
+{"step": 1510, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 10, "train_loss": 0.5744757999647532, "lr": 0.001, "eval_loss": 0.5704955042965035}
+{"step": 1661, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 11, "train_loss": 0.5722273146079866, "lr": 0.001, "eval_loss": 0.5731697842455863}
+{"step": 1812, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 12, "train_loss": 0.5725300343620856, "lr": 0.001, "eval_loss": 0.5730130991383937}
+{"step": 1963, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 13, "train_loss": 0.572885873696662, "lr": 0.001, "eval_loss": 0.5705826245572587}
+{"step": 2114, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 14, "train_loss": 0.5709721398669363, "lr": 0.001, "eval_loss": 0.5712597699453449}
+{"step": 2265, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 15, "train_loss": 0.570557738376769, "lr": 0.001, "eval_loss": 0.5712493586039702}
+{"step": 2416, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 16, "train_loss": 0.5704615771375745, "lr": 0.001, "eval_loss": 0.5733042109091955}
+{"step": 2567, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 17, "train_loss": 0.5698912956856734, "lr": 0.001, "eval_loss": 0.574855322539959}
+{"step": 2718, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 18, "train_loss": 0.5702069374109735, "lr": 0.001, "eval_loss": 0.5724653487503376}
+{"step": 2869, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 19, "train_loss": 0.5692859274267361, "lr": 0.001, "eval_loss": 0.5714054811751604}
+{"step": 3020, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 20, "train_loss": 0.5680898893747898, "lr": 0.001, "eval_loss": 0.5728274904271607}
+{"step": 3020, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "final": true, "best_epoch": 10, "best_validation_loss": 0.5704955042965035, "validation_auroc": 0.7614917348321285, "validation_auprc": 0.7553760767479817}

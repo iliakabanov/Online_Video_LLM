@@ -1,21 +1,21 @@
 {
   "architecture": "mlp",
   "feature_groups": [
-    "lm"
+    "attention"
   ],
   "training_gt": "hard",
   "seed": 0,
-  "trainable_parameters": 13112065,
-  "validation_split": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1_s1_252x168/val_first2000",
+  "trainable_parameters": 7017217,
+  "validation_split": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/val_original",
   "train_config": {
     "data": {
-      "train": "processed/clevrer_proactive/train_group1.jsonl",
-      "eval": "processed/clevrer_proactive/val_group1.jsonl",
+      "train": "processed/clevrer_proactive/train_group1_features.jsonl",
+      "eval": "processed/clevrer_proactive/val_group1_features.jsonl",
       "eval_samples": 2000
     },
     "features": {
-      "train": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1_s1_252x168/train_first8000",
-      "eval": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1_s1_252x168/val_first2000",
+      "train": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/train_original",
+      "eval": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/val_original",
       "lm_layers": [
         12,
         18,
@@ -61,9 +61,10 @@
     },
     "optim": {
       "lr": 0.0005,
-      "weight_decay": 0,
-      "warmup_steps": 100,
-      "epochs": 10,
+      "weight_decay": 0.0,
+      "warmup_steps": 0,
+      "schedule": "constant",
+      "epochs": 5,
       "max_steps": null,
       "batch_size": 64,
       "grad_accum": 1,
@@ -97,7 +98,7 @@
   },
   "uhead_config": {
     "groups": [
-      "lm"
+      "attention"
     ],
     "projection_dims": {
       "lm": 256,
@@ -114,7 +115,8 @@
     "normalization_eps": 1e-06,
     "temporal_detector": "mlp"
   },
-  "checkpoint_path": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/checkpoints/mlp/01_lm/best.pt",
-  "experiment_id": "01_lm",
-  "best_epoch": 4
+  "checkpoint_path": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/checkpoints/original/mlp/02_attention/best.pt",
+  "mode": "original",
+  "experiment_id": "02_attention",
+  "best_epoch": 5
 }
