@@ -35,7 +35,7 @@ optim:
   weight_decay: 0.00
   warmup_steps: 0        # optimizer steps of linear warmup (0: none), then the schedule
   schedule: constant         # cosine: decay to 0 at the last step; constant: lr stays at lr
-  epochs: 10
+  epochs: 5
   max_steps: null          # optimizer steps; null: run all epochs
   batch_size: 64           # sequences (questions) per step; scripts/train.py through the backbone needs 1-2
   grad_accum: 1

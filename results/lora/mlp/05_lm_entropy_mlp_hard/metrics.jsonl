@@ -1,0 +1,11 @@
+{"step": 151, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 1, "train_loss": 0.1456376084724799, "lr": 0.0005, "eval_loss": 0.11725637898482363}
+{"step": 302, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 2, "train_loss": 0.09617389477049278, "lr": 0.0005, "eval_loss": 0.10271447579554271}
+{"step": 453, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 3, "train_loss": 0.07911383345821835, "lr": 0.0005, "eval_loss": 0.10607368373147537}
+{"step": 604, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 4, "train_loss": 0.0672535506255974, "lr": 0.0005, "eval_loss": 0.1050466197846611}
+{"step": 755, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 5, "train_loss": 0.057974431096323276, "lr": 0.0005, "eval_loss": 0.1117280953879913}
+{"step": 906, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 6, "train_loss": 0.04918255634753909, "lr": 0.0005, "eval_loss": 0.10829103026964454}
+{"step": 1057, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 7, "train_loss": 0.04509480339505815, "lr": 0.0005, "eval_loss": 0.12053564039029895}
+{"step": 1208, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 8, "train_loss": 0.03891103020221587, "lr": 0.0005, "eval_loss": 0.11909257845654588}
+{"step": 1359, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 9, "train_loss": 0.033649114620507944, "lr": 0.0005, "eval_loss": 0.1199663681818837}
+{"step": 1510, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 10, "train_loss": 0.029900558650592306, "lr": 0.0005, "eval_loss": 0.1374420908265888}
+{"step": 1510, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "final": true, "best_epoch": 2, "best_validation_loss": 0.10271447579554271, "validation_auroc": 0.993552148543995, "validation_auprc": 0.9943620638358365}

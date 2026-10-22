@@ -1,0 +1,6 @@
+{"step": 151, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 1, "train_loss": 0.14264141408023456, "lr": 0.0005, "eval_loss": 0.10806930614888088}
+{"step": 302, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 2, "train_loss": 0.09340110386641609, "lr": 0.0005, "eval_loss": 0.10054018242018563}
+{"step": 453, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 3, "train_loss": 0.07777714519607311, "lr": 0.0005, "eval_loss": 0.09923772127031365}
+{"step": 604, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 4, "train_loss": 0.0668343087497926, "lr": 0.0005, "eval_loss": 0.09868006777882393}
+{"step": 755, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "epoch": 5, "train_loss": 0.05708442588910362, "lr": 0.0005, "eval_loss": 0.10718899735245287}
+{"step": 755, "tags": "hard", "step_window": 5, "sigmoid_slope": 0.65, "gaussian_sigma": 2.0, "final": true, "best_epoch": 4, "best_validation_loss": 0.09868006777882393, "validation_auroc": 0.9940530283435861, "validation_auprc": 0.9948038808991738}
