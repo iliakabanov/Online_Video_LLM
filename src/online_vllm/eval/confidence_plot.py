@@ -11,10 +11,11 @@ predictions_test_*.json из uhead.evaluate): P(готов) и верность 
   Интервал — ±1,96·√(p(1−p)/n) по числу вопросов n.
 - levels: угадывание (1 / число вариантов, нужны записи вопросов --records) и точность на последней паре видео.
 - tradeoff: компромисс точности и задержки, не зависящий от порога. При пороге τ вопрос отвечается на первой паре
-  f с P > τ, а если такой нет — на последней паре видео. Точка τ — точность ответа Qwen на f и задержка f − t
-  относительно целевой пары t, усреднённые по вопросам, в двух вариантах:
-    signed — среднее f − t: ранний ответ уменьшает задержку (то же, что задержка от начала видео минус средняя t);
-    wait   — среднее max(0, f − t): сколько ждём после появления ответа, ранний ответ — ноль ожидания.
+  f с P > τ, а если такой нет — на последней паре видео. Точка τ — точность ответа Qwen на f и задержка,
+  усреднённые по вопросам, в двух вариантах:
+    signed   — среднее f − t относительно целевой пары t: ранний ответ уменьшает задержку;
+    absolute — среднее f, пары от начала видео (вопрос задан на паре 0). Та же кривая, что signed, сдвинутая
+               на среднюю целевую пару, поэтому AUC и delta_auc у них совпадают.
   Опора — таймер: ответ на паре k для всех вопросов, k = 0 … L − 1. У обеих кривых общие концы (все отвечают на
   первой паре / на последней), поэтому площади сравнимы: AUC — площадь под кривой, делённая на ширину оси X,
   delta_auc = AUC головы − AUC таймера (> 0: при той же задержке голова в среднем точнее таймера). Для signed ещё
@@ -73,10 +74,9 @@ def confidence_bins(traces: list[ReadinessTrace], bins: int = 10) -> list[dict]:
 
 
 def _points(fired: np.ndarray, target: np.ndarray, correct: np.ndarray) -> dict:
-    """Средние по вопросам при ответе на парах fired [Q]: точность, задержка со знаком и ожидание."""
-    delay = fired - target
-    return {"accuracy": float(correct[np.arange(len(fired)), fired].mean()), "signed": float(delay.mean()),
-            "wait": float(np.maximum(delay, 0).mean())}
+    """Средние по вопросам при ответе на парах fired [Q]: точность, задержка от целевой пары и от начала видео."""
+    return {"accuracy": float(correct[np.arange(len(fired)), fired].mean()),
+            "signed": float((fired - target).mean()), "absolute": float(fired.mean())}
 
 
 def _area(points: list[dict], axis: str, start: float, end: float) -> float:
@@ -112,9 +112,9 @@ def tradeoff(traces: list[ReadinessTrace], taus=None, marked=(0.3, 0.5, 0.7, 0.9
     # Общие концы: все отвечают на первой паре / на последней.
     head_curve, timer_curve = [first, *head, end], [first, *timer, end]
 
-    result = {"first_pair": first, "end_of_video": end, "head": head, "timer": timer,
-              "marked": [p for p in head if any(np.isclose(p["tau"], m) for m in marked)]}
-    for axis in ("signed", "wait"):
+    result = {"first_pair": first, "end_of_video": end, "mean_target_pair": float(target.mean()), "head": head,
+              "timer": timer, "marked": [p for p in head if any(np.isclose(p["tau"], m) for m in marked)]}
+    for axis in ("signed", "absolute"):
         head_auc = _area(head_curve, axis, first[axis], end[axis])
         timer_auc = _area(timer_curve, axis, first[axis], end[axis])
         result[axis] = {"head_auc": head_auc, "timer_auc": timer_auc, "delta_auc": head_auc - timer_auc}
@@ -164,15 +164,9 @@ def _plot_tradeoff(ax, tradeoff: dict, axis: str, title: str, xlabel: str):
         ax.annotate(f"τ = {point['tau']:g}", (point[axis], point["accuracy"]), xytext=(18, -22 - 14 * i),
                     textcoords="offset points", color=INK_2, fontsize=8,
                     arrowprops={"arrowstyle": "-", "color": MUTED, "linewidth": 0.8})
-    if axis == "signed":
-        ax.axvline(0, color=MUTED, linewidth=1, zorder=1)
-        ax.text(0, 1.0, " ответ появился", color=INK_2, fontsize=9, va="top", ha="left",
-                transform=ax.get_xaxis_transform())
-    else:
-        # Почти весь выигрыш головы — в первых парах ожидания: до 1 пары ось линейная, дальше логарифмическая.
-        ax.set_xscale("symlog", linthresh=1)
-        ax.set_xticks([0, 0.5, 1, 2, 5, 10, 20, 30])
-        ax.set_xticklabels(["0", "0,5", "1", "2", "5", "10", "20", "30"])
+    x, text = (0, " ответ появился") if axis == "signed" else (tradeoff["mean_target_pair"], " средняя целевая пара")
+    ax.axvline(x, color=MUTED, linewidth=1, zorder=1)
+    ax.text(x, 1.0, text, color=INK_2, fontsize=9, va="top", ha="left", transform=ax.get_xaxis_transform())
     ax.plot([], [], " ", label=f"прирост головы над таймером ΔAUC {metrics['delta_auc']:+.3f}")
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
@@ -183,14 +177,14 @@ def _plot_tradeoff(ax, tradeoff: dict, axis: str, title: str, xlabel: str):
 
 def plot_confidence_accuracy(result: dict, path: str | Path, title: str | None = None):
     """PNG из четырёх графиков: P(готов) и точность по сдвигу от целевой пары; точность по бинам P(готов);
-    компромисс точности и задержки со знаком и по ожиданию, голова против таймера."""
+    компромисс точности и задержки относительно целевой пары и от начала видео, голова против таймера."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
     from matplotlib.ticker import PercentFormatter
 
-    fig, ((time_ax, bins_ax), (signed_ax, wait_ax)) = plt.subplots(2, 2, figsize=(14, 11.2),
+    fig, ((time_ax, bins_ax), (signed_ax, absolute_ax)) = plt.subplots(2, 2, figsize=(14, 11.2),
                                                                      constrained_layout=True)
     levels = result["levels"]
 
@@ -249,8 +243,8 @@ def plot_confidence_accuracy(result: dict, path: str | Path, title: str | None =
                    f"Точность и задержка со знаком; при задержке 0: голова {signed['head_accuracy_at_0']:.3f}, "
                    f"таймер {signed['timer_accuracy_at_0']:.3f}",
                    "средняя задержка ответа относительно целевой пары, пары (1 пара = 0,08 с; < 0 — раньше)")
-    _plot_tradeoff(wait_ax, tradeoff, "wait", "Точность и ожидание после появления ответа",
-                   "среднее ожидание после целевой пары, пары (1 пара = 0,08 с; ранний ответ — 0)")
+    _plot_tradeoff(absolute_ax, tradeoff, "absolute", "Точность и задержка от начала видео (вопрос задан на паре 0)",
+                   "средняя пара ответа от начала видео (1 пара = 0,08 с)")
 
     fig.suptitle(title or f"{result['questions']} вопросов", color=INK_2, fontsize=10, x=0.01, ha="left")
     path = Path(path)
@@ -289,7 +283,7 @@ def main():
             print(f"P ∈ [{row['low']:.2f}, {row['high']:.2f}): вопросов {row['questions']}, "
                   f"точность {row['accuracy']:.3f} ± {row['accuracy_ci']:.3f}, сдвиг {row['offset']:+.1f}")
     tradeoff = result["tradeoff"]
-    for axis, name in (("signed", "задержка со знаком"), ("wait", "ожидание")):
+    for axis, name in (("signed", "задержка от целевой пары"), ("absolute", "задержка от начала видео")):
         metrics = tradeoff[axis]
         print(f"{name}: AUC головы {metrics['head_auc']:.3f}, таймера {metrics['timer_auc']:.3f}, "
               f"ΔAUC {metrics['delta_auc']:+.3f}")
