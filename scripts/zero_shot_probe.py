@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 from transformers import AutoProcessor
 
 import _paths  # noqa: F401  (src/ on the path)
@@ -80,7 +81,8 @@ def main():
     records = records[:args.limit]
     done = done_ids(answers_path)
     todo = [r for r in records if r.id not in done]
-    logger.info("%s: %d вопросов, %d уже посчитано", args.system, len(records), len(records) - len(todo))
+    logger.info("%s: %d вопросов, %d уже посчитано; результаты — %s", args.system, len(records),
+                len(records) - len(todo), answers_path)
 
     processor = AutoProcessor.from_pretrained(args.processor or model_id, revision=None if args.processor else
                                               args.revision, local_files_only=args.local_files_only)
@@ -97,6 +99,8 @@ def main():
     (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     started = time.time()
+    progress = tqdm(total=len(records), initial=len(records) - len(todo), desc=args.system, unit="вопр",
+                    mininterval=10)
     with open(answers_path, "a", encoding="utf-8") as f:
         for i, record in enumerate(todo, 1):
             pairs_total = whole_patches(record, args.stride, FRAMES_PER_PAIR)
@@ -125,8 +129,10 @@ def main():
                 raise RuntimeError(f"{record.id}: ответов {len(row['letters'])}, пар {pairs_total}")
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
+            progress.update()
             if i % 25 == 0 or i == len(todo):
                 logger.info("%d / %d, %.2f с на вопрос", i, len(todo), (time.time() - started) / i)
+    progress.close()
     print(f"{args.system}: {len(done_ids(answers_path))} вопросов в {answers_path}")
 
 
