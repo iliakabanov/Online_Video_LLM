@@ -18,6 +18,10 @@ class UHeadConfig:
     dropout: float = 0.1
     normalization_eps: float = 1.0e-6
     temporal_detector: str = "transformer"
+    compact_model_dim: int = 128
+    compact_nhead: int = 8
+    compact_num_layers: int = 1
+    compact_ffn_dim: int = 508
 
     def validate(self):
         if not self.groups or len(set(self.groups)) != len(self.groups) or set(self.groups) - set(FEATURE_DIMS):
@@ -32,8 +36,12 @@ class UHeadConfig:
             raise ValueError("model_dim must be positive and divisible by nhead")
         if self.num_layers < 1 or not 0 <= self.dropout < 1 or self.normalization_eps <= 0:
             raise ValueError("invalid Transformer, dropout, or normalization settings")
-        if self.temporal_detector not in {"mlp", "transformer"}:
-            raise ValueError("temporal_detector must be mlp or transformer")
+        if self.temporal_detector not in {"mlp", "transformer", "compact"}:
+            raise ValueError("temporal_detector must be mlp, transformer, or compact")
+        if (self.compact_model_dim <= 0 or self.compact_nhead <= 0
+                or self.compact_model_dim % self.compact_nhead or self.compact_num_layers < 1
+                or self.compact_ffn_dim <= 0):
+            raise ValueError("invalid compact Transformer settings")
 
     @property
     def fusion_dim(self):

@@ -17,6 +17,14 @@ def small_config():
     )
 
 
+def small_compact_config():
+    return UHeadConfig(
+        projection_dims={"lm": 8, "attention": 8, "entropy": 4, "vision": 4, "confidence": 4},
+        model_dim=16, nhead=4, num_layers=1, dropout=0.0, temporal_detector="compact",
+        compact_model_dim=8, compact_nhead=2, compact_num_layers=1, compact_ffn_dim=12,
+    )
+
+
 def features(batch=2, steps=4):
     return {name: torch.randn(batch, steps, dim) for name, dim in FEATURE_DIMS.items()}
 
@@ -80,6 +88,39 @@ def test_causal_invariance_and_prefix():
     torch.testing.assert_close(original[:, :3], prefix, rtol=0, atol=1e-6)
 
 
+def test_compact_transformer_is_causal_and_uses_its_bottleneck():
+    model = UHead(small_compact_config()).eval()
+    assert model.temporal_adapter.in_features == 16
+    assert model.temporal_adapter.out_features == 8
+    assert model.classifier.in_features == 8
+    x = features(batch=1, steps=5)
+    changed = {name: value.clone() for name, value in x.items()}
+    for value in changed.values():
+        value[:, 3:] = torch.randn_like(value[:, 3:]) * 100
+    with torch.no_grad():
+        original, future_changed = model(x), model(changed)
+    torch.testing.assert_close(original[:, :3], future_changed[:, :3], rtol=0, atol=1e-6)
+
+
+def test_default_compact_temporal_block_matches_mlp_head_capacity():
+    compact = UHead(UHeadConfig(groups=["entropy"], temporal_detector="compact"))
+    compact_temporal = sum(parameter.numel() for name, parameter in compact.named_parameters()
+                           if not name.startswith("fusion_block."))
+    assert compact_temporal == 263_037
+
+
+def test_compact_and_mlp_capacities_differ_by_132_for_every_ablation():
+    ablations = ("lm", "attention", "entropy", "lm_attention", "lm_entropy", "attention_entropy",
+                 "lm_attention_entropy")
+    for ablation in ablations:
+        groups = ablation.split("_")
+        compact = UHead(UHeadConfig(groups=groups, temporal_detector="compact"))
+        mlp = StateHead(UHeadConfig(groups=groups, temporal_detector="mlp"))
+        compact_parameters = sum(parameter.numel() for parameter in compact.parameters())
+        mlp_parameters = sum(parameter.numel() for parameter in mlp.parameters())
+        assert mlp_parameters - compact_parameters == 132
+
+
 def test_checkpoint_restores_normalization(tmp_path):
     config = small_config()
     model = UHead(config).eval()
@@ -95,6 +136,15 @@ def test_checkpoint_restores_normalization(tmp_path):
         torch.testing.assert_close(model(x), restored(x))
     for name in FEATURE_DIMS:
         torch.testing.assert_close(getattr(restored.fusion_block, f"{name}_mean"), stats[name][0])
+
+
+def test_compact_checkpoint_restores_as_compact_model(tmp_path):
+    config = small_compact_config()
+    model = UHead(config).eval()
+    save_checkpoint(model, config, _TrainConfig(), tmp_path)
+    restored = load_checkpoint(tmp_path).eval()
+    assert restored.config.temporal_detector == "compact"
+    assert restored.temporal_adapter.out_features == config.compact_model_dim
 
 
 def test_statehead_mlp_has_same_fusion_and_no_future_access():
