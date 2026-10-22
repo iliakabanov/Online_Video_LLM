@@ -150,7 +150,8 @@ loss:
 optim:
   lr: 1.0e-3
   weight_decay: 0.01
-  warmup_steps: 50         # шагов оптимизатора линейного warmup, дальше косинус до 0
+  warmup_steps: 50         # шагов оптимизатора линейного warmup, дальше schedule
+  schedule: cosine         # cosine: косинус до 0 к последнему шагу; constant: постоянный lr
   epochs: 1
   max_steps: null          # ограничение на число шагов оптимизатора
   batch_size: 1            # последовательностей на один проход

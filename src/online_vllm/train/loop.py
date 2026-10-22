@@ -31,10 +31,12 @@ def seed_everything(seed: int):
     torch.manual_seed(seed)
 
 
-def lr_factor(step: int, warmup: int, total: int) -> float:
-    """Linear warmup over `warmup` optimizer steps, then cosine decay to 0 at `total`."""
+def lr_factor(step: int, warmup: int, total: int, schedule: str = "cosine") -> float:
+    """Linear warmup over `warmup` optimizer steps, then cosine decay to 0 at `total` or a constant lr."""
     if step < warmup:
         return (step + 1) / warmup
+    if schedule == "constant":
+        return 1.0
     return 0.5 * (1 + math.cos(math.pi * min(1.0, (step - warmup) / max(1, total - warmup))))
 
 
@@ -115,7 +117,7 @@ def train(model, builder, config: TrainConfig, data_root: Path, output_dir: Path
     total = o.epochs * math.ceil(len(train_loader) / o.grad_accum)
     if o.max_steps is not None:
         total = min(total, o.max_steps)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: lr_factor(s, o.warmup_steps, total))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: lr_factor(s, o.warmup_steps, total, o.schedule))
 
     model.train()
     if not any(p.requires_grad for p in model.backbone.parameters()):

@@ -68,6 +68,7 @@ class OptimConfig:
     lr: float = 1.0e-3
     weight_decay: float = 0.01
     warmup_steps: int = 50
+    schedule: str = "cosine"  # after the warmup: cosine (decay to 0 at the last step) or constant
     epochs: int = 1
     max_steps: int | None = None  # optimizer steps; stops before the end of the epochs if reached
     batch_size: int = 1
@@ -106,6 +107,8 @@ class TrainConfig:
         o = self.optim
         if o.lr <= 0 or o.epochs < 1 or o.batch_size < 1 or o.grad_accum < 1 or o.warmup_steps < 0:
             raise ValueError("lr, epochs, batch_size, grad_accum must be positive and warmup_steps >= 0")
+        if o.schedule not in {"cosine", "constant"}:
+            raise ValueError("schedule must be cosine or constant")
         if o.max_steps is not None and o.max_steps < 1:
             raise ValueError("max_steps must be null or positive")
         if min(o.log_every, o.eval_every, o.save_every) < 1:

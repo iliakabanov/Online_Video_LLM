@@ -33,7 +33,8 @@ loss:
 optim:
   lr: 2.0e-4
   weight_decay: 0.01
-  warmup_steps: 100        # optimizer steps of linear warmup, then cosine decay to 0
+  warmup_steps: 100        # optimizer steps of linear warmup (0: none), then the schedule
+  schedule: cosine         # cosine: decay to 0 at the last step; constant: lr stays at lr
   epochs: 30
   max_steps: null          # optimizer steps; null: run all epochs
   batch_size: 64           # sequences (questions) per step; scripts/train.py through the backbone needs 1-2

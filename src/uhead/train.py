@@ -256,7 +256,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     optimizer = torch.optim.AdamW(model.parameters(), lr=o.lr, weight_decay=o.weight_decay)
     batches = math.ceil(len(loader) / o.grad_accum)
     total_steps = o.epochs * batches if o.max_steps is None else min(o.epochs * batches, o.max_steps)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, o.warmup_steps, total_steps))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, o.warmup_steps, total_steps, o.schedule))
     log = open(results_dir / "metrics.jsonl", "w", encoding="utf-8")
     step, best_loss, best_epoch = 0, math.inf, None
 

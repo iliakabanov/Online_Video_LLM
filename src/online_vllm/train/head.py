@@ -138,7 +138,7 @@ def train_head(model_config: ModelConfig, config: TrainConfig, data_root: Path, 
     total = o.epochs * math.ceil(batches / o.grad_accum)
     if o.max_steps is not None:
         total = min(total, o.max_steps)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: lr_factor(s, o.warmup_steps, total))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: lr_factor(s, o.warmup_steps, total, o.schedule))
     rng = np.random.default_rng(config.seed)
     log = open(output_dir / "metrics.jsonl", "a", encoding="utf-8")
     step, running = 0, []
