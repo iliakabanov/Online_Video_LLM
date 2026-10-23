@@ -9,7 +9,10 @@
    на последней паре видео (как в нашей метрике).
 
 Пишет JSON: по каждому вопросу момент срабатывания (пара, последний кадр пары, секунды), данный ответ, верен ли он,
-момент появления ответа в видео, а также P(готов) и ответ модели на каждой паре.
+момент появления ответа в видео, P(готов) и ответ модели на каждой паре и на каждом кадре. Решение принимается
+только после целой пары (энкодер Qwen кодирует видео парами кадров), поэтому у кадра — решение последней пары,
+закончившейся на нём или раньше: оба кадра пары p показывают решение пары p − 1, а на последнем кадре пары p оно
+обновляется. До конца первой пары решения нет (null).
 
 python scripts/answer_video.py --head checkpoints/lora/mlp/04_lm_attention_mlp_hard --device cuda \
     --output outputs/presentation/video_10000_answers.json
@@ -124,6 +127,21 @@ def main():
         above = [p for p, value in enumerate(row["probabilities"]) if value > threshold]
         fired = above[0] if above else len(row["probabilities"]) - 1
         chosen = record.choices[int(trace.chosen[fired])]
+        per_pair = [{"pair": p, "frame": last_frame(p), "p_ready": float(value),
+                     "answer": record.choices[int(trace.chosen[p])],
+                     "answer_probability": float(trace.probabilities[p].max())}
+                    for p, value in enumerate(row["probabilities"])]
+        # Кадр f видит решение последней пары, закончившейся не позже f: к нему модель видела f // stride + 1 кадров.
+        per_frame = []
+        for frame in range(record.num_frames):
+            pair = min((frame // stride + 1) // patch, len(per_pair)) - 1
+            decided = per_pair[pair] if pair >= 0 else None
+            per_frame.append({"frame": frame, "seconds": frame / record.fps,
+                              **({"pair": decided["pair"], "p_ready": decided["p_ready"],
+                                  "above_threshold": decided["p_ready"] > threshold, "answer": decided["answer"],
+                                  "answer_probability": decided["answer_probability"]} if decided else
+                                 {"pair": None, "p_ready": None, "above_threshold": False, "answer": None,
+                                  "answer_probability": None})})
         answers.append({
             "id": record.id, "question": record.question, "choices": record.choices,
             "true_answer": record.answers[0].answer, "answer_visible_frame": record.answers[0].start_frame,
@@ -131,10 +149,7 @@ def main():
             "answer_frame": last_frame(fired), "answer_seconds": last_frame(fired) / record.fps,
             "answer": chosen, "correct": chosen == record.answers[0].answer,
             "delay_frames": last_frame(fired) - last_frame(item.target_pair),
-            "per_pair": [{"pair": p, "frame": last_frame(p), "p_ready": float(value),
-                          "answer": record.choices[int(trace.chosen[p])],
-                          "answer_probability": float(trace.probabilities[p].max())}
-                         for p, value in enumerate(row["probabilities"])]})
+            "per_pair": per_pair, "per_frame": per_frame})
         print(f"{record.question}\n  ответ «{chosen}» ({'верно' if answers[-1]['correct'] else 'неверно'}, "
               f"правильный «{record.answers[0].answer}») на кадре {last_frame(fired)} "
               f"({last_frame(fired) / record.fps:.2f} с){'' if above else ', голова не сработала: конец видео'}; "
