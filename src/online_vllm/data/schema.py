@@ -1,15 +1,15 @@
 """Common record format of all proactive-QA datasets, the only thing training and evaluation see.
 
-Times are in seconds (datasets differ in fps). A question is asked at `ask_time`; `answers` are consecutive intervals
-[start, end) with the answer that is correct during that interval; an answer counts as on time if given within
-`accept_window` seconds after the start of its interval. A single interval reaching the end of the video means the
-answer appears once and does not change; several intervals mean the answer changes over time.
+Times are frame indices of the source video; `fps` gives seconds (frame k is time k / fps). A question is asked at
+`ask_frame`; `answers` are consecutive intervals [start_frame, end_frame] (both inclusive) with the answer that is
+correct on those frames. A single interval reaching the last frame means the answer appears once and does not change;
+several intervals mean the answer changes over time.
 
     {"id": ..., "dataset": "clevrer_proactive", "split": "train", "video": "raw/clevrer/videos/video_00001.mp4",
-     "duration": 5.12, "question": ..., "choices": [...], "ask_time": 0.0, "accept_window": 0.48,
-     "answers": [{"start": 1.36, "end": 5.12, "answer": "green"}], "meta": {...}}
+     "fps": 25, "num_frames": 128, "question": ..., "choices": [...], "ask_frame": 0,
+     "answers": [{"start_frame": 34, "end_frame": 127, "answer": "green"}], "meta": {...}}
 
-`video` is relative to DATA_ROOT; `meta` keeps dataset-specific fields (group, family, answer type, source fps ...).
+`video` is relative to DATA_ROOT; `meta` keeps dataset-specific fields (group, family, answer type ...).
 """
 import json
 from dataclasses import asdict, dataclass, field
@@ -19,8 +19,8 @@ from typing import Iterator
 
 @dataclass
 class Interval:
-    start: float
-    end: float
+    start_frame: int
+    end_frame: int
     answer: str
 
 
@@ -30,18 +30,18 @@ class Record:
     dataset: str
     split: str
     video: str
-    duration: float
+    fps: float
+    num_frames: int
     question: str
     choices: list[str]
-    ask_time: float
-    accept_window: float
+    ask_frame: int
     answers: list[Interval]
     meta: dict = field(default_factory=dict)
 
-    def answer_at(self, t: float):
-        """The correct answer at time t, None before the first interval (not answerable yet)."""
+    def answer_at(self, frame: int):
+        """The correct answer on this frame, None before the first interval (not answerable yet)."""
         for a in self.answers:
-            if a.start <= t < a.end:
+            if a.start_frame <= frame <= a.end_frame:
                 return a.answer
         return None
 
@@ -54,9 +54,10 @@ class Record:
         if len(set(self.choices)) != len(self.choices):
             raise ValueError(f"{self.id}: duplicate choices")
         for a, b in zip(self.answers, self.answers[1:]):
-            if abs(a.end - b.start) > 1e-6:
+            if b.start_frame != a.end_frame + 1:
                 raise ValueError(f"{self.id}: intervals are not consecutive")
-        if any(a.start >= a.end for a in self.answers) or self.answers[0].start < self.ask_time - 1e-6:
+        if any(a.start_frame > a.end_frame for a in self.answers) or self.answers[0].start_frame < self.ask_frame \
+                or self.answers[-1].end_frame >= self.num_frames:
             raise ValueError(f"{self.id}: bad interval bounds")
 
 

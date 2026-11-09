@@ -1,0 +1,15 @@
+# qwen_3b_head.yaml for GPUs under ~10 GB: the language model's linear layers in int8 (~4.7 GB of GPU memory).
+# Features from this backbone differ slightly from bfloat16 ones: keep them in their own directory, and run the head
+# on the same int8 backbone.
+backbone:
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: null
+  dtype: bfloat16
+  quantization: 8bit
+lora:
+  enabled: false
+head:
+  classes: [silent, prepare, speak]
+  hidden_dims: [512]
+  activation: gelu
+  dropout: 0.1

@@ -1,0 +1,20 @@
+# Capacity-matched causal Transformer for comparison with the MLP StateHead.
+# Projection and fusion settings match default.yaml; only the temporal detector differs.
+groups: [lm, attention, entropy, vision, confidence]
+projection_dims:
+  lm: 256
+  attention: 256
+  entropy: 64
+  vision: 128
+  confidence: 32
+projection_hidden_dims: {}
+model_dim: 512
+nhead: 8
+num_layers: 2
+dropout: 0.2
+normalization_eps: 1.0e-6
+temporal_detector: compact
+compact_model_dim: 128
+compact_nhead: 8
+compact_num_layers: 1
+compact_ffn_dim: 508

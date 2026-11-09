@@ -1,0 +1,134 @@
+{
+  "architecture": "mlp",
+  "feature_groups": [
+    "lm",
+    "attention",
+    "entropy",
+    "vision",
+    "confidence"
+  ],
+  "training_gt": "hard",
+  "seed": 0,
+  "trainable_parameters": 21557409,
+  "validation_split": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/val_lora",
+  "train_config": {
+    "data": {
+      "train": "processed/clevrer_proactive/train_group1_features.jsonl",
+      "eval": "processed/clevrer_proactive/val_group1_features.jsonl",
+      "eval_samples": 2000
+    },
+    "features": {
+      "train": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/train_lora",
+      "eval": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/data/features/group1/val_lora",
+      "lm_layers": [
+        12,
+        18,
+        24,
+        36
+      ],
+      "vis_layers": [
+        7,
+        15,
+        23,
+        31
+      ],
+      "prev_pairs": 3,
+      "top_tokens": 10,
+      "inputs": [
+        "lm_last@36"
+      ],
+      "shard_gb": 20,
+      "upload": true,
+      "batch_size": 4,
+      "remote": "gdrive",
+      "remote_folder": "1KSh5UPQkBhGfES7j5YoxAKm8Cb7H-OI5"
+    },
+    "video": {
+      "frame_stride": 1,
+      "frame_size": [
+        252,
+        168
+      ]
+    },
+    "labels": {
+      "speak_delay": 0
+    },
+    "loss": {
+      "focal_gamma": 2.0,
+      "class_alpha": {
+        "silent": 0.25,
+        "prepare": 1.0,
+        "speak": 1.0
+      },
+      "lm_weight": 0.0,
+      "binary_reduction": "patch_mean"
+    },
+    "optim": {
+      "lr": 0.0005,
+      "weight_decay": 0.0,
+      "warmup_steps": 0,
+      "schedule": "constant",
+      "epochs": 5,
+      "max_steps": null,
+      "batch_size": 64,
+      "grad_accum": 1,
+      "grad_clip": 1.0,
+      "num_workers": 2,
+      "log_every": 50,
+      "eval_every": 500,
+      "save_every": 1000
+    },
+    "eval": {
+      "taus": [
+        0.3,
+        0.5,
+        0.7,
+        0.9
+      ],
+      "thresholds": [
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+        0.85,
+        0.9,
+        0.95,
+        0.99
+      ]
+    },
+    "seed": 0
+  },
+  "uhead_config": {
+    "groups": [
+      "lm",
+      "attention",
+      "entropy",
+      "vision",
+      "confidence"
+    ],
+    "projection_dims": {
+      "lm": 256,
+      "attention": 256,
+      "entropy": 64,
+      "vision": 128,
+      "confidence": 32
+    },
+    "projection_hidden_dims": {},
+    "model_dim": 512,
+    "nhead": 8,
+    "num_layers": 2,
+    "dropout": 0.2,
+    "normalization_eps": 1e-06,
+    "temporal_detector": "mlp",
+    "compact_model_dim": 128,
+    "compact_nhead": 8,
+    "compact_num_layers": 1,
+    "compact_ffn_dim": 508
+  },
+  "checkpoint_path": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/checkpoints/lora/mlp/12_all_mlp_hard/best.pt",
+  "mode": "lora",
+  "experiment_id": "12_all_mlp_hard",
+  "best_epoch": 4
+}

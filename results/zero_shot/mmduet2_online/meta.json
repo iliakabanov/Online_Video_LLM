@@ -1,0 +1,16 @@
+{
+  "system": "mmduet2_online",
+  "model": "wangyueqian/MMDuet2",
+  "revision": "3224235ebb6256e2af7c196f2c265d6cf20c311a",
+  "processor": "wangyueqian/MMDuet2",
+  "dtype": "bfloat16",
+  "size": [
+    252,
+    168
+  ],
+  "stride": 1,
+  "frames_per_pair": 2,
+  "seed": 0,
+  "questions_file": "processed/clevrer_proactive/val_group1_features_eval500.jsonl",
+  "questions": 500
+}

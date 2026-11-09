@@ -3,5 +3,4 @@
 name: clevrer_proactive
 train: processed/clevrer_proactive/train.jsonl        # 180,783 questions on 10,000 videos
 eval: processed/clevrer_proactive/validation.jsonl    # 90,287 questions on 4,999 videos
-video_fps: 25          # source videos: 128 frames, 5.12 s, 480x320
-sample_fps: 2          # frames per second given to the model (to be chosen in the training config)
+video_fps: 25          # source videos: 128 frames, 5.12 s, 480x320; which frames the model sees: configs/train/

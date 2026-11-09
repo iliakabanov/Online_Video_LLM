@@ -1,7 +1,7 @@
-"""Convert <PROCESSED>/<split>_balanced.json (frames) into the common schema (seconds): <PROCESSED>/<split>.jsonl.
+"""Convert <PROCESSED>/<split>_balanced.json into the common schema: <PROCESSED>/<split>.jsonl.
 
-Frame k covers [k / 25, (k + 1) / 25) s, so an interval [start_frame, end_frame] becomes
-[start_frame / 25, (end_frame + 1) / 25); accept_frames -> accept_window = accept_frames / 25.
+Both are in frames of the source video (25 fps) with inclusive intervals; the common schema adds fps, num_frames and
+the video path relative to DATA_ROOT, and moves dataset-specific fields into meta.
 
     python -m dataset_builders.clevrer_proactive.export --split train
 """
@@ -25,10 +25,10 @@ def video_rel(q):
 def convert(q):
     return Record(
         id=q["id"], dataset="clevrer_proactive", split=q["split"], video=video_rel(q),
-        duration=N_FRAMES / FPS, question=q["question"], choices=q["choices"],
-        ask_time=q["ask_frame"] / FPS, accept_window=q["accept_frames"] / FPS,
-        answers=[Interval(a["start_frame"] / FPS, (a["end_frame"] + 1) / FPS, a["answer"]) for a in q["answers"]],
-        meta={"fps": FPS, **{k: q[k] for k in META if k in q}})
+        fps=FPS, num_frames=N_FRAMES, question=q["question"], choices=q["choices"],
+        ask_frame=q["ask_frame"],
+        answers=[Interval(a["start_frame"], a["end_frame"], a["answer"]) for a in q["answers"]],
+        meta={k: q[k] for k in META if k in q})
 
 
 def main():

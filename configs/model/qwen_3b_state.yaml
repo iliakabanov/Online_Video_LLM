@@ -1,0 +1,17 @@
+backbone:
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: null  # Resolved Hub commit is recorded on loading; pin it for experiment runs.
+  dtype: bfloat16
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  component: language_model
+  modules: [q_proj, k_proj, v_proj, o_proj]
+  layers: null  # All layers; or an explicit list, e.g. [0, 1, 2].
+head:
+  classes: [silent, prepare, speak]
+  hidden_dims: [512]
+  activation: gelu
+  dropout: 0.1

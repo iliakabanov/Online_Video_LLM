@@ -1,0 +1,52 @@
+# Training the state head on CLEVRER-Proactive group 1 (one answer that appears once and does not change).
+# Pair with configs/model/qwen_3b_head.yaml (frozen backbone, no LoRA):
+#   scripts/extract_features.py --split train|eval   once: backbone features of every patch of every video
+#   scripts/train_head.py                            the head on those features, any number of times
+data:                      # the features halves of the group-1 subsets; the LoRA halves fine-tune Qwen (README §11)
+  train: processed/clevrer_proactive/train_group1_features.jsonl   # relative to DATA_ROOT
+  eval: processed/clevrer_proactive/val_group1_features.jsonl
+  eval_samples: 2000       # fixed random subset of eval for the evaluations during training; the final one uses all
+features:                  # src/online_vllm/train/FEATURES.md
+  # where extract_features.py writes and train_head.py reads (DATA_ROOT). New directories for the features halves:
+  # features extracted earlier (group1_s1_252x168/*) came from the first videos, now the LoRA half.
+  train: features/group1_half_s1_252x168/train
+  eval: features/group1_half_s1_252x168/val
+  lm_layers: [12, 18, 24, 36]   # extraction: language-model layers 1..36 (36: after the final norm)
+  vis_layers: [7, 15, 23, 31]   # extraction: vision-encoder blocks from 0 (these four attend over the whole pair)
+  prev_pairs: 3                 # extraction: attention groups for pairs p-1 .. p-3 one by one, earlier pairs as one
+  top_tokens: 10                # extraction: largest log-probabilities of the vocabulary at the probe
+  inputs: [lm_last@36]          # training: feature groups the head reads, concatenated (FeatureSet.rows)
+  batch_size: 4                 # extraction: questions per forward pass; roughly +1 GB of GPU memory per question
+  shard_gb: 20                  # extraction: a shard of whole videos is closed once it reaches this size (GB)
+  upload: true                  # extraction: copy every closed shard to Google Drive, then delete it locally
+  remote: gdrive                # rclone remote (rclone config) for the copies
+  remote_folder: 1KSh5UPQkBhGfES7j5YoxAKm8Cb7H-OI5   # Google Drive folder id: drive.google.com/drive/folders/<id>
+video:                     # baked into the features: changing these needs a new extraction
+  frame_stride: 1          # the model sees every k-th source frame
+  frame_size: [252, 168]   # [width, height] the frames are resized to; multiples of 28 (Qwen patch 14 x merge 2)
+labels:                    # applied when training the head: can change without a new extraction
+  speak_delay: 0           # w, in model frames: silent before S, prepare on [S, S + w), speak on the first patch end >= S + w
+loss:
+  focal_gamma: 2.0
+  class_alpha: {silent: 0.25, prepare: 1.0, speak: 1.0}
+  lm_weight: 0.0           # language loss on the answer; not implemented yet, must stay 0
+optim:
+  lr: 5.0e-4
+  weight_decay: 0.00
+  warmup_steps: 0        # optimizer steps of linear warmup (0: none), then the schedule
+  schedule: constant         # cosine: decay to 0 at the last step; constant: lr stays at lr
+  epochs: 5
+  max_steps: null          # optimizer steps; null: run all epochs
+  batch_size: 64           # sequences (questions) per step; scripts/train.py through the backbone needs 1-2
+  grad_accum: 1
+  grad_clip: 1.0
+  num_workers: 2           # scripts/train.py only: DataLoader workers decoding videos
+  log_every: 50            # train_head.py / train.py; uhead.train logs, validates and saves once per epoch
+  eval_every: 500
+  save_every: 1000
+eval:
+  taus: [0.3, 0.5, 0.7, 0.9]   # online simulation: answer at the first patch with P(speak) > tau
+  # uhead.train: eval is split by video into equal validation and test halves; after training best.pt (lowest
+  # validation loss) is evaluated on validation at every threshold; test: python -m uhead.evaluate --threshold ...
+  thresholds: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
+seed: 0
