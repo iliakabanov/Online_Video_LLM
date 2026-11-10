@@ -70,10 +70,19 @@ python scripts/train_online_sft.py --init-run outputs/lora_sft --output outputs/
 python scripts/evaluate_online_sft.py --run outputs/online_sft --adapter best         # test-половина
 ```
 
-- Видео train и половины validation/test те же, что у офлайн-прогона: `split.json` переносится,
-  `--validation-videos` не меняется. Поэтому test-метрики сравнимы с офлайн-моделью.
+- **Train — видео, которых офлайн-адаптер не видел.** Офлайн-прогон учился на первых n видео
+  `train_group1_lora.jsonl` (`data.train_videos` в его `split.json`) и знает их ответы. На таких видео слоты учились бы
+  памяти адаптера, а не тому, что видно в кадре. Поэтому онлайн-обучение пропускает эти n видео и берёт следующие.
+  `--train-videos k` берёт только первые k из них. Например, для `lora1000` (n = 1000) это видео сцен 1001–4997:
+  3 995 видео, 26 058 вопросов. `--reuse-offline-videos` возвращает офлайн-видео в обучение. Видео онлайн-train
+  записываются в `split.json` прогона (`online_train`).
+- **Validation и test** — те же половины, что у офлайн-прогона (`--validation-videos` переносится, seed тот же). Для
+  `lora1000` это 500 и 500 видео из первой тысячи `val_group1_lora.jsonl`. Поэтому test-метрики онлайн- и офлайн-моделей
+  сравнимы на одних и тех же вопросах.
+- **Кэш энкодера.** Новых train-видео в кэше офлайн-прогона нет, скрипт закодирует их перед обучением: ~14 МБ на видео
+  при 252×168, для 3 995 видео около 56 ГБ.
 - Остальные флаги как у `train_lora_sft.py`: `--epochs`, `--lr`, `--batch-size`, `--gradient-accumulation`,
-  `--gradient-checkpointing`, `--train-videos`. `--init-adapter none` начинает с базовой Qwen.
+  `--gradient-checkpointing`. `--init-adapter none` начинает с базовой Qwen.
 - **Память:** обучаемая последовательность — всё видео, около 3,7 тыс. токенов, длиннее средних офлайн-префиксов.
   Если батч 2 не помещается, используйте `--batch-size 1 --gradient-accumulation 4` или `--gradient-checkpointing`.
 

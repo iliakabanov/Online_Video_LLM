@@ -81,6 +81,27 @@ def _plain_hidden(model, ids, types, positions, video):
         return online_hidden(model, batch)[0]
 
 
+def test_online_training_skips_the_videos_of_the_offline_adapter(tmp_path):
+    from lora.lora import _records_for_first_videos
+    from lora.online import online_training_records
+    from online_vllm.data.schema import Interval, Record, save_jsonl
+    # Scenes 5, 1, 3, 0, 4 (not in file order), two questions each.
+    records = [Record(f"s{s}-q{q}", "toy", "train", f"v{s}.mp4", 25, 8, "question", ["green", "red"], 0,
+                      [Interval(2, 7, "green")], {"scene_index": s}) for s in (5, 1, 3, 0, 4) for q in range(2)]
+    save_jsonl(records, tmp_path / "t.jsonl")
+    offline = {r.video for r in _records_for_first_videos(tmp_path / "t.jsonl", 2)}
+    assert offline == {"v0.mp4", "v1.mp4"}
+    online = online_training_records(tmp_path / "t.jsonl", skip_videos=2, videos=None)
+    assert {r.video for r in online} == {"v3.mp4", "v4.mp4", "v5.mp4"} and len(online) == 6
+    assert {r.video for r in online_training_records(tmp_path / "t.jsonl", skip_videos=2, videos=2)} == \
+        {"v3.mp4", "v4.mp4"}
+    assert len(online_training_records(tmp_path / "t.jsonl", skip_videos=0, videos=None)) == 10
+    with pytest.raises(ValueError, match="offline adapter"):
+        online_training_records(tmp_path / "t.jsonl", skip_videos=5, videos=None)
+    with pytest.raises(ValueError, match="left after"):
+        online_training_records(tmp_path / "t.jsonl", skip_videos=2, videos=4)
+
+
 def test_tokens_are_added_once_and_only_lora_and_token_rows_train(online, builder):
     model, tiny, tokens, *_ = online
     tokenizer = tiny.processor.tokenizer

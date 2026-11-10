@@ -392,6 +392,25 @@ def online_loss(model, batch: Mapping[str, torch.Tensor], *, tokens: ControlToke
 
 # --------------------------------------------------------------------------------------------------------------- data
 
+def online_training_records(path: str | Path, *, skip_videos: int, videos: int | None) -> list[Record]:
+    """Training questions of an online run: the videos of a LoRA training file in scene_index order, the first
+    ``skip_videos`` left out (those the offline adapter learned: it knows their answers, so the slots would learn its
+    memory instead of what the frames show), then the first ``videos`` of the rest (None: all of them)."""
+    from .lora import _records_for_first_videos
+    if skip_videos < 0 or (videos is not None and videos < 1):
+        raise ValueError("skip_videos must be nonnegative and videos positive or None")
+    records = _records_for_first_videos(Path(path), None)
+    scenes = {record.video: record.meta["scene_index"] for record in records}
+    order = sorted(scenes, key=scenes.__getitem__)
+    rest = order[skip_videos:]
+    if not rest:
+        raise ValueError(f"{path}: all {len(order)} videos are among the {skip_videos} of the offline adapter")
+    if videos is not None and videos > len(rest):
+        raise ValueError(f"{path}: {videos} videos requested, {len(rest)} left after the first {skip_videos}")
+    chosen = set(rest if videos is None else rest[:videos])
+    return [record for record in records if record.video in chosen]
+
+
 def _letter_ids(tokenizer, count: int) -> list[int]:
     ids = [tokenizer(letter, add_special_tokens=False).input_ids for letter in LETTERS[:count]]
     if any(len(value) != 1 for value in ids):
