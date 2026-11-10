@@ -8,6 +8,7 @@
 
 Архитектура Qwen2.5-VL-3B + LoRA + MLP состояния, конфиг и smoke-тесты: [models/README.md](src/online_vllm/models/README.md).
 Разметка, обучающая последовательность и запуск обучения: [train/README.md](src/online_vllm/train/README.md).
+Онлайн-SFT с управляющими токенами `<listen>`/`<speak>` поверх офлайн-LoRA: [lora/ONLINE.md](src/lora/ONLINE.md).
 
 ## Датасеты
 
