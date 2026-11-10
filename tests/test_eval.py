@@ -15,6 +15,60 @@ def test_ideal_timing_and_seconds():
     assert metrics["timing_mean_seconds"] == 0
 
 
+def test_window_classification_keeps_only_pairs_near_the_target():
+    """Far pairs are easy: perfect over all pairs, but within ±2 of t* the scores do not separate."""
+    p = np.array([[0.0, 0.0, 0.0, 0.6, 0.5, 0.6, 0.5, 1.0, 1.0, 1.0]])  # t* = 5
+    c = evaluate_readiness(p, [5], [5], [0.5], 2, 1)["classification"]
+    assert c["count_pm2"] == 5 and c["count_pm5"] == 10 and c["count"] == 10
+    # Within ±2 (pairs 3..7): negatives 0.6, 0.5; positives 0.6, 0.5, 1.0 -> AUROC (1 + .5 + .5 + 2 * 1 + 0) / 6.
+    assert c["auroc_pm2"] == pytest.approx((0.5 + 1 + 0 + 0.5 + 1 + 1) / 6)
+    assert c["auroc_pm2"] < c["auroc"]
+    assert c["f1_pm2"] == pytest.approx(2 * 0.6 * 1.0 / 1.6)  # precision 3/5, recall 3/3 at p >= 0.5
+    near, label = p[0, 3:8], np.array([0, 0, 1, 1, 1])
+    assert c["binary_cross_entropy_pm2"] == pytest.approx(
+        -np.mean(label * np.log(np.clip(near, 1e-7, 1)) + (1 - label) * np.log(np.clip(1 - near, 1e-7, 1))))
+    assert c["brier_score_pm2"] == pytest.approx(np.mean((near - label) ** 2))
+
+
+def test_latency_accuracy_curve_by_hand():
+    """t* = 1, P = 3. Question 0 is right only at pair 2, question 1 at pairs 0 and 2. As τ grows: τ < .2 both answer at
+    pair 0 (lateness 0, accuracy .5); τ in [.6, .8) question 1 waits to the end (lateness .5, still .5); τ >= .8 both
+    answer at pair 2 (lateness 1, accuracy 1)."""
+    from online_vllm.eval.metrics import latency_accuracy
+    p = np.array([[.2, .8, .9], [.6, .3, .7]])
+    result = latency_accuracy(p, [1, 1], np.ones_like(p, dtype=bool), [[0, 0, 1], [1, 0, 1]])
+    assert result["max_lateness_pairs"] == 1 and result["start_accuracy"] == .5 and result["end_accuracy"] == 1
+    assert result["auc"] == pytest.approx(.5)  # accuracy .5 on lateness [0, 1), 1 at 1
+    assert result["auc_10"] == pytest.approx((.5 * 1 + 1 * 9) / 10)
+    assert result["auc_2"] == pytest.approx((.5 * 1 + 1 * 1) / 2)
+    assert result["accuracy_at"] == {"0": .5, "1": 1, "2": 1, "5": 1, "10": 1}
+    assert evaluate_readiness(p, [1, 1], [1, 1], [.5], 1, 1, correct=[[0, 0, 1], [1, 0, 1]])["latency_accuracy"] == \
+        result
+    assert evaluate_readiness(p, [1, 1], [1, 1], [.5], 1, 1)["latency_accuracy"] is None
+
+
+def test_latency_accuracy_equals_a_sweep_over_every_threshold():
+    from online_vllm.eval.metrics import latency_accuracy
+    rng = np.random.default_rng(0)
+    p = rng.random((30, 12)).round(2)  # ties between and within questions
+    lengths = rng.integers(4, 13, 30)
+    mask = np.arange(12) < lengths[:, None]
+    targets = [int(rng.integers(0, n)) for n in lengths]
+    correct = rng.random((30, 12)) < np.linspace(.3, .9, 12)
+    points = []
+    for tau in np.r_[-1, np.unique(p)]:
+        late = right = 0
+        for row, t, n, c in zip(p, targets, lengths, correct):
+            hits = np.flatnonzero(row[:n] > tau)
+            k = int(hits[0]) if len(hits) else n - 1
+            late += max(k - t, 0); right += c[k]
+        points.append((late / 30, right / 30))
+    x, y = np.array(points).T
+    best, total = np.maximum.accumulate(y), x[-1]
+    expected = np.sum(best * np.diff(np.r_[x, total])) / total
+    assert latency_accuracy(p, targets, mask, correct)["auc"] == pytest.approx(expected)
+
+
 def test_early_late_and_miss_timing_is_conditional():
     probabilities = np.array([[.9, .1, .1, .1], [.1, .1, .1, .9], [.1, .1, .1, .1]])
     result = evaluate_readiness(probabilities, [2, 2, 2], [1, 1, 1], [0.5], 2, 1)

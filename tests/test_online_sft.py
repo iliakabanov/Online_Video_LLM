@@ -131,8 +131,11 @@ def test_positions_are_those_of_the_offline_input(online):
     video_end = len(tpl.prefix) + 4 * tpl.per_pair
     torch.testing.assert_close(main_positions, reference[:, :video_end])
     tail_start = reference[0, video_end]  # the offline tail after the whole video
-    slot_last = example["slot_index"][-1] + 1
-    assert (positions[:, slot_last] == tail_start).all()
+    for k in range(3):  # a slot: the largest position so far + 1; no slot after the last pair
+        slot = int(example["slot_index"][k]) + 1
+        reach = positions[:, :slot][:, ids[:slot] != tokens.listen].max()
+        assert ids[slot] == tokens.listen and (positions[:, slot] == reach + 1).all()
+    assert ids[int(example["slot_index"][3]) + 1] == tokens.speak  # the first branch follows the last pair
     branch_end = positions[:, -(1 + len(tpl.tail)):]
     assert (branch_end[:, 0] == tail_start).all()  # <speak> of the last-pair branch: where the tail would start
 
@@ -149,13 +152,48 @@ def test_branch_equals_a_separate_sequence_without_its_own_listen(online):
     for row, s in enumerate([0, 2, 3]):
         cut = int(example["slot_index"][s]) + 1  # through the last visual token of pair s, not slot s
         start = int(example["answer_index"][row]) - branch + 1
-        assert ids[start] == tokens.speak and ids[cut] == tokens.listen  # slot s is left out of the reference
+        assert ids[start] == tokens.speak  # slot s (none after the last pair) is left out of the reference
+        assert ids[cut] == (tokens.listen if s < 3 else tokens.speak)
         plain = _plain_hidden(model, ids[:cut].tolist() + ids[start:start + branch].tolist(),
                               types[:cut].tolist() + [0] * branch,
                               torch.cat([positions[:, :cut], positions[:, start:start + branch]], 1),
                               entry["embeds"][:(s + 1) * per])
         torch.testing.assert_close(hidden[start:start + branch], plain[cut:], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(hidden[cut - 1], plain[cut - 1], rtol=1e-4, atol=1e-4)  # the slot-s prediction
+
+
+def test_training_sequence_is_the_video_cut_at_s(online):
+    """A training item: pairs 0..s with <listen> between them, then <speak> + tail; slots up to s, one answer at s.
+    It equals the evaluation branch s, and the batch sampler knows its length without the video."""
+    from lora.online import OnlineSFTDataset
+    model, tiny, tokens, data, records, cache = online
+    split = ClevrerLoRASplitConfig(num_workers=0, vision_cache=str(cache.path))
+    dataset = OnlineSFTDataset(records, builder=tiny, split=split, tokens=tokens, spec=RopeSpec.of(model),
+                               objective=OnlineObjective(), seed=0)
+    cuts = set()
+    for epoch in range(3):
+        dataset.set_epoch(epoch)
+        lengths = dataset.prefix_patches(epoch)
+        for index, record in enumerate(records):
+            item = dataset[index]
+            s = int(item["branch_pair"][0])
+            cuts.add(s)
+            assert len(item["slot_target"]) == lengths[index] == s + 1 and item["slot_target"][-1] == 1
+            assert (item["input_ids"] == tokens.listen).sum() == s and (item["input_ids"] == tokens.speak).sum() == 1
+            assert torch.equal(item["attention"], torch.ones_like(item["attention"]).tril())  # plainly causal
+            entry = cache.load(record.video)
+            assert len(item["video_embeds"]) == (s + 1) * len(entry["embeds"]) // VisionCache.patches(entry)
+    assert len(cuts) > 1
+    # The training item equals the branch s of the evaluation sequence.
+    item = dataset[0]
+    s = int(item["branch_pair"][0])
+    full = _example(model, tiny, tokens, cache, records[0], branches=[s])[2]
+    with torch.no_grad():
+        a = online_hidden(model, collate_online([item], pad_id=1))[0]
+        b = online_hidden(model, collate_online([full], pad_id=1))[0]
+    branch = 1 + 2  # <speak> + the toy tail
+    torch.testing.assert_close(a[-branch:], b[-branch:], rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(a[item["slot_index"]], b[full["slot_index"][:s + 1]], rtol=1e-4, atol=1e-4)
 
 
 def test_the_input_of_slot_s_does_not_reach_branch_s(online):
@@ -270,9 +308,10 @@ def base_path(request, tiny_base, tmp_path_factory):
     return str(path)
 
 
-def test_offline_adapter_is_merged_and_the_run_reloads(builder, base_path, tmp_path):
-    """The online model without training answers as the offline model with its adapter; a saved online adapter (LoRA
-    and token rows) loads into a freshly built online model."""
+def test_lora_starts_from_the_offline_adapter_and_the_run_reloads(builder, base_path, tmp_path):
+    """The online LoRA starts as the offline adapter (trainable), so the online model without training answers as the
+    offline model; a saved online adapter (LoRA and token rows) loads into a fresh online model without the offline
+    one, as load_online_run does."""
     from online_vllm.models import build_model
     offline = build_model(_config(base_path), local_files_only=True).eval()
     offline.state_head.requires_grad_(False)  # as prepare_lora_sft_model does
@@ -285,6 +324,12 @@ def test_offline_adapter_is_merged_and_the_run_reloads(builder, base_path, tmp_p
     model, tokens = build_online_model(_config(base_path), tiny.processor.tokenizer, init_adapter=tmp_path / "offline",
                                        local_files_only=True)
     model.eval()
+    lora = {name.replace(".default", ""): p for name, p in model.backbone.named_parameters() if ".lora_" in name}
+    offline_lora = {name.replace(".default", ""): p for name, p in offline.backbone.named_parameters()
+                    if ".lora_" in name}
+    assert lora.keys() == offline_lora.keys() and all(p.requires_grad for p in lora.values())
+    for name, parameter in lora.items():
+        torch.testing.assert_close(parameter, offline_lora[name])
     ids = torch.tensor([[1, 6, 9, 10, 7]])
     old = [i for i in range(offline.qwen.config.text_config.vocab_size) if i not in (tokens.listen, tokens.speak)]
     with torch.no_grad():  # the rows of the two new tokens were set from INIT_WORDS: every other logit is the same
@@ -296,7 +341,7 @@ def test_offline_adapter_is_merged_and_the_run_reloads(builder, base_path, tmp_p
         trained = model.qwen(input_ids=ids).logits
     save_online_adapter(model, tmp_path / "online")
     fresh, again = build_online_model(_config(base_path), _RemapBuilder(builder.processor).processor.tokenizer,
-                                      init_adapter=tmp_path / "offline", local_files_only=True)
+                                      init_adapter=None, local_files_only=True)
     assert again == tokens
     # _perturb sharpened the base attention too: do the same to the fresh base, then load the adapter.
     with torch.no_grad():
@@ -330,6 +375,13 @@ def test_training_run_writes_adapters_metrics_and_predictions(online, tmp_path):
     summary = lines[1]["validation"]
     assert summary["count"] == 2 and set(summary["online"]) == {"0.5", "0.9"}
     assert 0 < summary["control_mass"] <= 1
+    assert {"auroc", "auprc", "f1", "precision", "recall"} <= set(summary["classification"])
+    assert summary["classification"]["count"] == 2 * 4  # 2 questions x 4 prefixes
+    assert 0 <= summary["latency_accuracy"]["auc"] <= 1
+    best_info = json.loads((out / "best" / "sft_metadata.json").read_text())
+    assert best_info["selection"] == "bce_pm2" and best_info["epoch"] in (0, 1)
+    bce = [line["validation"]["classification"]["binary_cross_entropy_pm2"] for line in lines]
+    assert best_info["epoch"] == int(np.argmin(bce)) and best_info["validation_bce_pm2"] == min(bce)
     predictions = json.loads((out / "predictions_validation_epoch_1.json").read_text())["predictions"]
     assert all(len(row["probabilities"]) == len(row["answer_correct"]) == 4 for row in predictions)
     info = json.loads((out / "online.json").read_text())

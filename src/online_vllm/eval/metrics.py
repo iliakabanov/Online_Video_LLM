@@ -71,26 +71,98 @@ def flatten_readiness_metrics(result: dict) -> dict:
     return metrics
 
 
+# Окна вокруг целевой пары (в парах) для классификации префиксов: далёкие от t* префиксы лёгкие и завышают AUROC по
+# всем парам, окно |k - t*| <= w оставляет трудную границу (w пар до t* — отрицательные, t*..t*+w — положительные).
+WINDOWS = (2, 5, 10)
+
+
+def _pointwise(y: np.ndarray, score: np.ndarray, threshold: float, suffix: str = "") -> dict:
+    pred = score >= threshold
+    tp, fp, fn = int((pred & (y == 1)).sum()), int((pred & (y == 0)).sum()), int((~pred & (y == 1)).sum())
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    auroc, auprc = _binary_curves(y, score)
+    return {f"accuracy{suffix}": float((pred == y).mean()), f"precision{suffix}": precision,
+            f"recall{suffix}": recall,
+            f"f1{suffix}": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
+            f"auroc{suffix}": auroc, f"auprc{suffix}": auprc}
+
+
+def _calibration(y: np.ndarray, score: np.ndarray, suffix: str = "") -> dict:
+    clipped = np.clip(score, 1e-7, 1 - 1e-7)
+    return {f"brier_score{suffix}": float(np.mean((score - y) ** 2)),
+            f"binary_cross_entropy{suffix}": float(-np.mean(y * np.log(clipped) + (1 - y) * np.log(1 - clipped)))}
+
+
 def _classification(probabilities, target_pairs, valid_mask, threshold):
-    labels, scores = [], []
+    """Каждая пара каждого видео — префикс, метка 1 начиная с t*. Метрики по всем парам и, с суффиксом _pm<w>, только
+    по парам |k - t*| <= w (WINDOWS), в том числе BCE и Brier."""
+    labels, scores, offsets = [], [], []
     for p, target_pair, mask in zip(probabilities, target_pairs, valid_mask):
         n = int(mask.sum())
         if not 0 <= target_pair < n:
             raise ValueError("target_pair должен принадлежать valid части видео")
         labels.append(np.arange(n) >= target_pair)
         scores.append(p[:n])
+        offsets.append(np.arange(n) - target_pair)
     y, score = np.concatenate(labels).astype(np.int64), np.concatenate(scores)
-    pred = score >= threshold
-    tp, fp, fn = int((pred & (y == 1)).sum()), int((pred & (y == 0)).sum()), int((~pred & (y == 1)).sum())
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    auroc, auprc = _binary_curves(y, score)
-    score_clip = np.clip(score, 1e-7, 1 - 1e-7)
-    return {"accuracy": float((pred == y).mean()), "precision": precision, "recall": recall,
-            "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
-            "auroc": auroc, "auprc": auprc, "brier_score": float(np.mean((score - y) ** 2)),
-            "binary_cross_entropy": float(-np.mean(y * np.log(score_clip) + (1 - y) * np.log(1 - score_clip))),
-            "count": int(len(y))}
+    offset = np.concatenate(offsets)
+    result = {**_pointwise(y, score, threshold), **_calibration(y, score), "count": int(len(y))}
+    for w in WINDOWS:
+        near = np.abs(offset) <= w
+        result.update(_pointwise(y[near], score[near], threshold, f"_pm{w}"))
+        result.update(_calibration(y[near], score[near], f"_pm{w}"))
+        result[f"count_pm{w}"] = int(near.sum())
+    return result
+
+
+# Бюджеты средней задержки (в парах): при них latency_accuracy сообщает точность (accuracy_at) и площадь (auc_<b>).
+LATENCY_BUDGETS = (0, 1, 2, 5, 10)
+AUC_BUDGETS = (2, 5, 10)
+
+
+def latency_accuracy(probabilities, target_pairs, valid_mask, correct) -> dict:
+    """Кривая «средняя задержка — точность» по всем порогам τ и площадь под ней.
+
+    При пороге τ вопрос отвечается на первой паре k с p_k > τ, а без такой пары — принудительно на последней паре
+    (ответ есть всегда, верность — correct на этой паре). Задержка вопроса — max(k − t*, 0) пар: ранний ответ не
+    экономит время, его цена — в точности. Рост τ сдвигает каждый ответ только позже, поэтому кривая идёт от τ → 0
+    (все отвечают на паре 0: задержка 0) до τ → 1 (все в конце: задержка L = mean(P − 1 − t*)); оба конца зависят
+    только от данных, не от модели. A(ℓ) — лучшая точность при средней задержке ≤ ℓ (ступенчатая огибающая, без
+    интерполяции). auc = ∫₀ᴸ A(ℓ)dℓ / L, auc_<b> — то же на [0, b] пар (AUC_BUDGETS), accuracy_at — A(ℓ) при
+    LATENCY_BUDGETS. На CLEVRER L ≈ 33 пары, а кривая выходит на полку за ~1 пару, поэтому auc почти равна точности в
+    конце видео; своевременность отражают короткие бюджеты. Кривая точная: события — пороги, на которых меняется пара
+    ответа хотя бы одного вопроса."""
+    late0 = right0 = 0.0
+    taus, d_late, d_right = [], [], []
+    for p, target, mask, c in zip(probabilities, target_pairs, valid_mask, correct):
+        n = int(mask.sum())
+        run = np.maximum.accumulate(np.asarray(p[:n], dtype=float))
+        records = np.r_[0, np.flatnonzero(run[1:] > run[:-1]) + 1]  # пары, где растёт running max
+        after = np.r_[records[1:], n - 1]  # куда сдвигается ответ, когда τ доходит до run[record]
+        late = lambda k: np.maximum(k - target, 0)  # noqa: E731
+        c = np.asarray(c, dtype=float)
+        late0 += late(0); right0 += c[0]
+        taus.append(run[records]); d_late.append(late(after) - late(records)); d_right.append(c[after] - c[records])
+    videos = len(target_pairs)
+    tau, d_late, d_right = np.concatenate(taus), np.concatenate(d_late), np.concatenate(d_right)
+    order = np.argsort(tau, kind="stable")
+    tau, x, y = tau[order], late0 + np.cumsum(d_late[order]), right0 + np.cumsum(d_right[order])
+    last = np.r_[tau[1:] != tau[:-1], True]  # состояние после всех событий одного порога
+    x, y = np.r_[late0, x[last]] / videos, np.r_[right0, y[last]] / videos
+    best = np.maximum.accumulate(y)
+    total = float(x[-1])
+
+    def area(limit: float) -> float:
+        edges = np.minimum(np.r_[x, max(limit, total)], limit)
+        return float(np.sum(best * np.diff(edges)))
+
+    def at(budget: float) -> float:
+        return float(best[np.searchsorted(x, budget, side="right") - 1])
+
+    return {"auc": area(total) / total if total > 0 else float(best[-1]),
+            **{f"auc_{budget}": area(budget) / budget for budget in AUC_BUDGETS}, "max_lateness_pairs": total, "start_accuracy": float(y[0]), "end_accuracy": float(y[-1]),
+            "accuracy_at": {str(b): at(b) for b in LATENCY_BUDGETS}, "points": int(len(x))}
 
 
 def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps,
@@ -152,7 +224,8 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
     """Возвращает JSON-совместимые метрики; все timing-значения в исходных кадрах и, при FPS, секундах.
 
     correct — по видео булев массив «ответ Qwen на этой паре верный» (eval/answers.py); с ним к метрикам каждого
-    порога добавляются answer_accuracy, answer_accuracy_answered, timely_correct_pm2 и точность по исходам."""
+    порога добавляются answer_accuracy, answer_accuracy_answered, timely_correct_pm2 и точность по исходам, а в
+    latency_accuracy — кривая «задержка — точность» по всем порогам (без correct — None)."""
     p = np.asarray(probabilities, dtype=float)
     if p.ndim != 2 or len(p) != len(target_pairs) or len(p) != len(visible_pairs):
         raise ValueError("probabilities должны иметь форму [B,P], согласованную с metadata")
@@ -172,7 +245,8 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
         if len(correct) != len(p) or any(len(c) < n for c, n in zip(correct, mask.sum(1))):
             raise ValueError("correct должен содержать по видео массив не короче его valid-части")
     output = {"model": model, "tags": tags, "num_videos": len(p),
-              "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {}}
+              "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {},
+              "latency_accuracy": None if correct is None else latency_accuracy(p, target_pairs, mask, correct)}
     frames_per_pair = temporal_patch * frame_stride
     for tau in taus:
         if not 0 < tau < 1:

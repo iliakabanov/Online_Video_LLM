@@ -1,20 +1,20 @@
 """Online SFT with <listen>/<speak> control tokens on top of an offline LoRA SFT run (lora/online.py).
 
-The offline adapter (--init-run, --init-adapter) is merged into Qwen; a new LoRA of the same settings (model.yaml of
-that run) and the rows of the two new tokens are trained. Data: the LoRA halves of the group-1 subsets, as the offline
-run (split.json of --init-run). Training takes the videos of train_group1_lora.jsonl after the first n the offline
-adapter learned (data.train_videos; --train-videos: only the first of those), since on its own videos it knows the
-answers; validation and test are the same halves as the offline run's, so both models are compared on the same
-questions. Every question is one sequence: the whole video with a slot after every pair (<listen> on the input,
-target <listen> before the target pair and <speak> from it on) and two answer branches, after a pair s ~ U(t*, P - 1)
-drawn every epoch and after the last pair. The video comes from the vision cache of the offline run (the encoder is
-unchanged; missing videos are encoded first).
+The LoRA starts from the offline adapter (--init-run, --init-adapter) and keeps training (same settings, model.yaml of
+that run), together with the rows of the two new tokens. Data: the LoRA halves of the group-1 subsets, as the offline
+run (split.json of --init-run). Training takes the same videos as the offline adapter, the first n of
+train_group1_lora.jsonl (data.train_videos; --skip-offline-videos: the videos after them instead); validation and test
+are the same halves as the offline run's, so both models are compared on the same questions. Every question is one
+sequence cut as the offline prefixes, after a pair s ~ U(t*, P - 1) drawn every epoch: a slot after every pair before
+s (<listen> on the input, target <listen> before the target pair and <speak> from it on), then <speak> and the answer.
+The video comes from the vision cache of the offline run (the encoder is unchanged; missing videos are encoded first).
 
 Before training and after every epoch the validation half is evaluated with a branch after every pair: loss, answer
-accuracy at the start / target / s / end, and the online metrics per threshold (tau 0.5 is the native rule
-P(<speak>) > P(<listen>)); predictions_validation_epoch_<n>.json is in the format of eval/thresholds.py and
-eval/readiness_plot.py. best/ is the adapter of the lowest validation loss, last/ that of the last epoch. The test half:
-scripts/evaluate_online_sft.py.
+accuracy at the start / target / s / end, the latency / accuracy curve over all thresholds, prefix classification and
+the online metrics per threshold (tau 0.5 is the native rule P(<speak>) > P(<listen>));
+predictions_validation_epoch_<n>.json is in the format of eval/thresholds.py and eval/readiness_plot.py. best/ is the
+adapter of the lowest prefix-classification BCE over the pairs within 2 of the target pair (--selection), last/ that
+of the last epoch. The test half: scripts/evaluate_online_sft.py.
 
 python scripts/train_online_sft.py --init-run outputs/lora_sft --output outputs/online_sft --tags hard
 """
@@ -37,6 +37,7 @@ from lora.lora import (  # noqa: E402
     split_validation_videos,
 )
 from lora.online import (  # noqa: E402
+    SELECTIONS,
     TAGS,
     OnlineObjective,
     RopeSpec,
@@ -60,7 +61,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--init-run", required=True, help="offline run of train_lora_sft.py (model.yaml, split.json)")
     parser.add_argument("--init-adapter", default="best",
-                        help="adapter of --init-run merged into Qwen: best, last, or none (start from the base Qwen)")
+                        help="adapter of --init-run the LoRA starts from: best, last, or none (a fresh LoRA)")
     parser.add_argument("--output", required=True)
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", REPO / "data"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -73,9 +74,14 @@ def main() -> None:
                         help="loss = slot loss + answer_weight * answer loss")
     parser.add_argument("--taus", type=float, nargs="+", default=[0.5, 0.6, 0.7, 0.8, 0.9])
     parser.add_argument("--train-videos", type=int,
-                        help="the first n training videos after those of the offline adapter (default: all of them)")
-    parser.add_argument("--reuse-offline-videos", action="store_true",
-                        help="train on the videos of the offline adapter too (it knows their answers: a leak)")
+                        help="the first n training videos (default: as many as the offline adapter; with "
+                             "--skip-offline-videos all the rest)")
+    parser.add_argument("--skip-offline-videos", action="store_true",
+                        help="train on the videos after those of the offline adapter, whose answers it has not learned")
+    parser.add_argument("--selection", choices=SELECTIONS, default="bce_pm2",
+                        help="best/: lowest validation prefix-classification BCE over the pairs |k - t*| <= 2 "
+                             "(bce_pm2); largest area under the latency / accuracy curve over mean lateness 0..2 pairs "
+                             "(auc_2) or the whole range (auc); or lowest validation loss")
     parser.add_argument("--epochs", type=int, default=defaults.epochs)
     parser.add_argument("--lr", type=float, default=defaults.learning_rate, help="constant learning rate")
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size, help="sequences per forward pass")
@@ -112,7 +118,7 @@ def main() -> None:
 
     adapter = None if args.init_adapter == "none" else init_run / args.init_adapter
     builder = InputBuilder.from_config(config, local_files_only=args.local_files_only)
-    torch.manual_seed(sft.seed)  # the random LoRA A initialization happens in build_online_model
+    torch.manual_seed(sft.seed)  # a fresh LoRA (--init-adapter none) draws its A in build_online_model
     model, tokens = build_online_model(config, builder.processor.tokenizer, init_adapter=adapter,
                                        local_files_only=args.local_files_only, device=args.device)
     assert_online_isolation(model, expected_targets=expected_lora_targets(model))
@@ -120,12 +126,13 @@ def main() -> None:
     root = Path(args.data_root)
     # split.train_videos stays that of the offline run: the first n videos, which its adapter learned. None: all.
     offline_videos = len({r.video for r in _records_for_first_videos(root / split.train, split.train_videos)})
-    skip = 0 if args.reuse_offline_videos else offline_videos
-    train = online_training_records(root / split.train, skip_videos=skip, videos=args.train_videos)
+    skip = offline_videos if args.skip_offline_videos else 0
+    videos = args.train_videos if args.train_videos or args.skip_offline_videos else offline_videos
+    train = online_training_records(root / split.train, skip_videos=skip, videos=videos)
     train_videos = sorted({record.video for record in train})
     scenes = sorted({record.meta["scene_index"] for record in train})
     print(f"Online training: {len(train_videos)} videos, {len(train)} questions, scenes {scenes[0]}..{scenes[-1]} "
-          f"(skipped the first {skip} videos, those of the offline adapter)")
+          f"(skipped the first {skip}; the offline adapter learned the first {offline_videos})")
     validation, _, info = split_validation_videos(
         _records_for_first_videos(root / split.validation, split.validation_videos), VALIDATION_SPLIT_SEED)
     cache = VisionCache.for_model(split.vision_cache, model, frame_size=split.train_frame_size,
@@ -144,9 +151,9 @@ def main() -> None:
                                objective=objective, device=args.device, taus=args.taus, desc="Validation")
 
     train_online_sft(model, loader, sft, output_dir=args.output, device=args.device, tokens=tokens,
-                     objective=objective, evaluate=evaluate,
+                     objective=objective, evaluate=evaluate, selection=args.selection,
                      run_info={"init_run": str(init_run), "init_adapter": None if adapter is None else str(adapter),
-                               "taus": args.taus},
+                               "taus": args.taus, "selection": args.selection},
                      split_info={"data": asdict(split), **info,
                                  "online_train": {"skipped_offline_videos": skip, "videos": len(train_videos),
                                                   "questions": len(train), "train_videos": train_videos}})

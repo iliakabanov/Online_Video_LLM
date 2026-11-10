@@ -1,13 +1,18 @@
 """Online SFT: after every pair of frames Qwen writes a control token, <listen> (keep watching) or <speak> (answer now).
 
-Starting point: the offline LoRA SFT adapter (lora/lora.py) merged into Qwen; on top of it a new LoRA of the same
-settings and the embedding rows of the two new tokens are trained (PEFT trainable_token_indices; in Qwen2.5-VL-3B the
-embedding and lm_head are tied, so one row per token serves both).
+Starting point: the offline LoRA SFT adapter (lora/lora.py). Its LoRA keeps training, together with the embedding rows
+of the two new tokens (PEFT trainable_token_indices; in Qwen2.5-VL-3B the embedding and lm_head are tied, so one row
+per token serves both).
 
-One question is one forward pass, in training and in evaluation:
+One question is one forward pass. Training cuts the video as the offline prefixes, after a pair s ~ U(t*, P - 1)
+drawn anew every epoch:
 
-    main      [prompt <|vision_start|>] [pair 0] ▢ [pair 1] ▢ ... [pair P-1] ▢
-    branches  [<speak> <tail>]_s ... one per answer pair s
+    [prompt <|vision_start|>] [pair 0] ▢ [pair 1] ▢ ... [pair s] [<speak> <tail>] -> answer letter
+
+Evaluation runs the whole video with a branch after every pair (p_k and the answer at every pair in one pass):
+
+    main      [prompt <|vision_start|>] [pair 0] ▢ [pair 1] ▢ ... [pair P-1]
+    branches  [<speak> <tail>]_s ... one per pair s
 
 Every slot ▢ holds <listen> on the input: the history of a policy that has not answered yet. The target of slot k is
 predicted from the last visual token of pair k (before the slot), so the slot's input never affects its own target:
@@ -19,8 +24,8 @@ A branch [<speak> <tail>] after pair s is what the model sees when it speaks the
 (<|vision_end|><|im_end|>\\n<|im_start|>assistant\\n), then the answer letter, supervised at the last tail token. Through
 the attention mask a branch sees the main sequence up to the last visual token of pair s, without the <listen> of
 slot s, and its own tokens; the main sequence never sees a branch. So a branch equals a separate sequence that ends
-with <speak> after pair s (tests/test_online_sft.py). Training uses two branches: s ~ U(t*, P - 1), drawn anew every
-epoch, and the end of the video P - 1. Evaluation uses a branch after every pair.
+with <speak> after pair s (tests/test_online_sft.py), the training sequence cut at s. With the training cut the one
+branch sees the whole main sequence: an ordinary causal sequence.
 
 3D positions are those of offline training: the visual tokens keep the positions of the contiguous video
 (models/positions.py), and a slot after pair k stands at the largest position so far + 1, where the offline template
@@ -30,8 +35,8 @@ exactly the positions of the offline prefix up to pair k.
 Inference (OnlineSession): the prompt goes into the KV cache, then for every pair its visual tokens are appended (one
 pass over the new tokens) and p_k = softmax(logit <speak>, logit <listen>)[<speak>] is read at the last one. If
 p_k > tau, <speak> and the tail are appended and the answer letter is read; otherwise <listen> is appended. A video
-that ends without <speak> gets <speak> right after its last pair (no <listen> before it, as the end-of-video branch of
-training) and counts as a miss.
+that ends without <speak> gets <speak> right after its last pair (no <listen> before it, as a training cut at the
+last pair) and counts as a miss.
 """
 from __future__ import annotations
 
@@ -75,7 +80,22 @@ LISTEN, SPEAK = "<listen>", "<speak>"
 # The new rows start at the mean embedding of these words.
 INIT_WORDS = {LISTEN: "listen", SPEAK: "speak"}
 TAGS = ("hard", "step", "sigmoid")
-SELECTION_METRIC = "loss"  # validation loss, lower is better
+# Choice of best/ on the validation half:
+#   "bce_pm2" — the prefix classification loss near the target: BCE of p_k against "ready" (k >= t*) over the pairs
+#               |k - t*| <= 2 (eval/metrics.py, classification binary_cross_entropy_pm2), lower is better;
+#   "auc_2", "auc" — the area under the latency / accuracy curve (latency_accuracy) over mean lateness 0..2 pairs or
+#               the whole range, higher is better;
+#   "loss" — the validation loss of the training objective, lower is better.
+SELECTIONS = ("bce_pm2", "auc_2", "auc", "loss")
+
+
+def selection_score(summary: Mapping[str, Any], selection: str) -> float:
+    """Higher is better for every choice."""
+    if selection == "bce_pm2":
+        return -summary["classification"]["binary_cross_entropy_pm2"]
+    if selection == "loss":
+        return -summary["loss"]
+    return summary["latency_accuracy"][selection]
 ONLINE_FORMAT = "online_video_llm_online_sft_v1"
 
 
@@ -143,28 +163,42 @@ def init_control_rows(qwen, tokenizer, tokens: ControlTokens) -> None:
 
 def build_online_model(config: ModelConfig, tokenizer, *, init_adapter: str | Path | None,
                        local_files_only: bool = False, device: str | None = None):
-    """Qwen with the offline adapter merged in, the control tokens, and a new LoRA (``config.lora``) plus trainable
-    rows of the two tokens. Returns the VideoStateModel (its StateHead frozen and unused) and the token ids; the tokens
-    are added to ``tokenizer``."""
-    from peft import LoraConfig, TaskType, get_peft_model
+    """Qwen with the control tokens and a LoRA (``config.lora``, that of the offline run) plus trainable rows of the
+    two tokens. The LoRA starts from the offline adapter ``init_adapter`` and keeps training (None: a fresh LoRA, B = 0).
+    Returns the VideoStateModel (its StateHead frozen and unused) and the token ids; the tokens are added to
+    ``tokenizer``."""
+    from copy import deepcopy
+
+    from peft import LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
+    from safetensors.torch import load_file
     from online_vllm.models import build_model
     from online_vllm.models.builder import resolve_targets
     from online_vllm.models.model import VideoStateModel
 
     if not config.lora.enabled or config.lora.component != "language_model":
         raise ValueError("Online SFT needs a language_model LoRA config (that of the offline adapter)")
-    offline = build_model(config, local_files_only=local_files_only, device=device)
-    if init_adapter is not None:
-        load_lora_adapter(offline, init_adapter)
-    merged = offline.backbone.merge_and_unload()  # without an adapter: LoRA B = 0, the base itself
-    config = offline.config  # with the resolved revision
+    plain = deepcopy(config)
+    plain.lora.enabled = False
+    base = build_model(plain, local_files_only=local_files_only, device=device)
+    config = deepcopy(base.config)  # with the resolved revision
+    config.lora.enabled = True
+    qwen = base.backbone
     tokens = add_control_tokens(tokenizer)
-    init_control_rows(merged, tokenizer, tokens)
+    init_control_rows(qwen, tokenizer, tokens)
     rows = [tokens.listen, tokens.speak]
-    backbone = get_peft_model(merged, LoraConfig(
+    backbone = get_peft_model(qwen, LoraConfig(
         task_type=TaskType.CAUSAL_LM, r=config.lora.r, lora_alpha=config.lora.alpha,
-        lora_dropout=config.lora.dropout, bias="none", target_modules=resolve_targets(merged, config.lora),
-        trainable_token_indices=rows if _tied(merged) else {"embed_tokens": rows, "lm_head": rows}))
+        lora_dropout=config.lora.dropout, bias="none", target_modules=resolve_targets(qwen, config.lora),
+        trainable_token_indices=rows if _tied(qwen) else {"embed_tokens": rows, "lm_head": rows}))
+    if init_adapter is not None:
+        # The offline adapter has the same LoRA modules (same model.yaml) and no token rows: those keep their init.
+        weights = load_file(str(Path(init_adapter) / "adapter_model.safetensors"))
+        own = get_peft_model_state_dict(backbone)
+        lora = {key for key in own if "trainable_tokens" not in key}
+        if weights.keys() != lora:
+            raise ValueError(f"Offline adapter {init_adapter} does not match the LoRA of the online model: "
+                             f"unexpected {sorted(weights.keys() - lora)[:3]}, missing {sorted(lora - weights.keys())[:3]}")
+        set_peft_model_state_dict(backbone, {**own, **weights})
     model = VideoStateModel(backbone, config)
     model.state_head.requires_grad_(False)
     return model, tokens
@@ -199,7 +233,7 @@ def assert_online_isolation(model: torch.nn.Module, *, expected_targets: int | N
 
 
 def save_online_adapter(model: torch.nn.Module, path: str | Path, *, metadata: Mapping[str, Any] | None = None) -> Path:
-    """The new LoRA and the change of the two token rows (PEFT stores both in adapter_model.safetensors)."""
+    """The LoRA and the two token rows (PEFT stores both in adapter_model.safetensors)."""
     assert_online_isolation(model)
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
@@ -211,13 +245,13 @@ def save_online_adapter(model: torch.nn.Module, path: str | Path, *, metadata: M
 
 def load_online_run(run_dir: str | Path, adapter: str = "best", *, local_files_only: bool = False,
                     device: str | None = None):
-    """Rebuild a trained online model: the offline adapter of the run merged in, the tokens, and ``<run>/<adapter>``.
-    Returns (model, builder, tokens, info of online.json)."""
+    """Rebuild a trained online model: the tokens and ``<run>/<adapter>`` (the whole LoRA and the token rows, so the
+    offline adapter it started from is not needed). Returns (model, builder, tokens, info of online.json)."""
     run_dir = Path(run_dir)
     info = json.loads((run_dir / "online.json").read_text(encoding="utf-8"))
     config = ModelConfig.load(run_dir / "model.yaml")
     builder = InputBuilder.from_config(config, local_files_only=local_files_only)
-    model, tokens = build_online_model(config, builder.processor.tokenizer, init_adapter=info["init_adapter"],
+    model, tokens = build_online_model(config, builder.processor.tokenizer, init_adapter=None,
                                        local_files_only=local_files_only, device=device)
     if asdict(tokens) != info["tokens"]:
         raise ValueError(f"Token ids {asdict(tokens)} differ from those of the run {info['tokens']}")
@@ -263,22 +297,25 @@ def template(builder: InputBuilder, prompt: str, grid: torch.Tensor, second_per_
 
 def build_example(tpl: Template, entry: Mapping[str, torch.Tensor], *, spec: RopeSpec, tokens: ControlTokens,
                   slot_targets: torch.Tensor, branch_pairs: Sequence[int], answer: int) -> dict[str, Any]:
-    """One question as one sequence: main (prefix, pairs, a <listen> slot after each) and a branch per answer pair.
+    """One question as one sequence: main (prefix, the first P = len(slot_targets) pairs of the video, a <listen> slot
+    after each but the last: nothing in the sequence would see it) and a branch per answer pair.
 
     Tensors: input_ids, mm_token_type_ids [L]; position_ids [3, L]; attention [L, L] (bool, True = may attend);
     video_embeds [P * per_pair, D] from the vision cache; slot_index [P] (where slot k's target is predicted: the last
     visual token of pair k) with slot_target [P] (P(<speak>) wanted); answer_index [B] (the last tail token of each
-    branch) with answer_target [B] (the correct letter) and branch_pair [B]."""
+    branch) with answer_target [B] (the correct letter) and branch_pair [B]. Training cuts the video after s with the
+    one branch s: the offline prefix up to pair s with <listen> between the pairs, then <speak> + tail."""
     grid = entry["grid"].reshape(3)
-    patches = int(grid[0])
-    if len(slot_targets) != patches:
-        raise ValueError(f"{len(slot_targets)} slot targets for {patches} pairs")
+    patches = len(slot_targets)
+    if not 1 <= patches <= int(grid[0]):
+        raise ValueError(f"{patches} slot targets for a video of {int(grid[0])} pairs")
     if not branch_pairs or not all(0 <= s < patches for s in branch_pairs):
-        raise ValueError("branch_pairs must be pairs of the video")
+        raise ValueError("branch_pairs must be pairs of the main sequence")
     n, per = len(tpl.prefix), tpl.per_pair
+    # The positions of a pair do not depend on the pairs after it: those of a prefix video are a slice of these.
     video_pos = vision_positions(n, grid.tolist(), spec.merge, float(entry["second_per_grid_ts"].reshape(-1)[0]),
                                  spec.tokens_per_second)
-    if video_pos.shape[1] != patches * per:
+    if video_pos.shape[1] != int(grid[0]) * per:
         raise ValueError("Visual positions do not match the template")
     ids, types = list(tpl.prefix), [0] * n
     positions = [torch.arange(n).expand(3, -1)]
@@ -291,9 +328,10 @@ def build_example(tpl: Template, entry: Mapping[str, torch.Tensor], *, spec: Rop
         reach = max(reach, int(chunk.max()))
         reaches.append(reach)
         last_visual.append(len(ids) - 1)
-        ids.append(tokens.listen)
-        types.append(0)
-        positions.append(torch.full((3, 1), reach + 1))
+        if k < patches - 1:
+            ids.append(tokens.listen)
+            types.append(0)
+            positions.append(torch.full((3, 1), reach + 1))
     main = len(ids)
     branch = [tokens.speak] + list(tpl.tail)
     spans, answer_index = [], []
@@ -443,8 +481,8 @@ def _answer_id(question: _Question) -> int:
 
 
 class OnlineSFTDataset(torch.utils.data.Dataset):
-    """Training sequences: the whole video with a slot after every pair, and two answer branches, s ~ U(t*, P - 1)
-    (drawn per epoch as the offline prefixes, lora.sample_prefix) and the end of the video."""
+    """Training sequences as the offline prefixes: the video cut after a pair s ~ U(t*, P - 1) (drawn per epoch,
+    lora.sample_prefix), a slot after every pair up to s, and the answer after <speak> at s."""
 
     def __init__(self, records: Sequence[Record], *, builder: InputBuilder, split: ClevrerLoRASplitConfig,
                  tokens: ControlTokens, spec: RopeSpec, objective: OnlineObjective, seed: int):
@@ -466,21 +504,27 @@ class OnlineSFTDataset(torch.utils.data.Dataset):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
+    def _cut(self, record: Record, target: int, patches: int, epoch: int) -> int:
+        return sample_prefix(target, patches, seed=self.seed, epoch=epoch, example_key=record.id).last_patch
+
     def prefix_patches(self, epoch: int) -> list[int]:
-        """Pairs of every sequence (the whole video), for _LengthGroupedBatches."""
-        temporal = self.builder.temporal_patch
-        return [-(-record.num_frames // self.split.frame_stride) // temporal for record in self.records]
+        """Pairs of every sequence of the epoch, from the record alone (no video), for _LengthGroupedBatches."""
+        temporal, result = self.builder.temporal_patch, []
+        for record in self.records:
+            patches = -(-record.num_frames // self.split.frame_stride) // temporal
+            target = _target_patch(record, builder=self.builder, frame_stride=self.split.frame_stride,
+                                   speak_delay=self.split.speak_delay, patches=patches)
+            result.append(self._cut(record, target, patches, epoch) + 1)
+        return result
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
         entry = self.cache.load(record.video)
         question = _question(record, entry, self.builder, self.split)
-        s = sample_prefix(question.target, question.patches, seed=self.seed, epoch=self.epoch,
-                          example_key=record.id).last_patch
-        # Always two branches, also when s is the last pair: every question weighs the same in the answer loss.
+        s = self._cut(record, question.target, question.patches, self.epoch)
         return build_example(question.template, entry, spec=self.spec, tokens=self.tokens,
-                             slot_targets=self.objective.targets(question.patches, question.target),
-                             branch_pairs=[s, question.patches - 1], answer=_answer_id(question))
+                             slot_targets=self.objective.targets(question.patches, question.target)[:s + 1],
+                             branch_pairs=[s], answer=_answer_id(question))
 
 
 def build_online_loader(records: Sequence[Record], *, builder: InputBuilder, split: ClevrerLoRASplitConfig,
@@ -534,7 +578,8 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
     online_vllm/eval/export.py (probabilities = p_k, answer_correct = the branch answer of pair k is right), which
     eval/thresholds.py and eval/readiness_plot.py read; tau = 0.5 is the native rule <speak> more likely than <listen>.
 
-    Loss: the training objective with the branches s (VALIDATION_PREFIX_SEED) and the last pair."""
+    Loss: the training objective with the cut s of VALIDATION_PREFIX_SEED: the slots up to s and the answer at s.
+    latency_accuracy (eval/metrics.py): the accuracy / mean lateness curve over all thresholds and the areas under it."""
     training = model.training
     model.eval()
     loader = DataLoader(_EvaluationExamples(list(records), builder, split, tokens, spec, objective), batch_size=None,
@@ -547,10 +592,10 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
             batch = _move_inputs(collate_online([example], pad_id=builder.processor.tokenizer.pad_token_id), device)
             parts = online_losses(model, batch, tokens)
             slots, answers = parts["slots"], parts["answers"]
-            slot_losses.append(float(parts["slot"]))
+            y = batch["slot_target"][:s + 1].to(slots)
+            slot_losses.append(float(-(y * slots[:s + 1, tokens.speak] + (1 - y) * slots[:s + 1, tokens.listen]).mean()))
+            answer_losses.append(float(-answers[s, batch["answer_target"][s]]))
             last = len(example["branch_pair"]) - 1
-            answer_losses.append(float(-(answers[s, batch["answer_target"][s]]
-                                         + answers[last, batch["answer_target"][last]]) / 2))
             control = slots[:, [tokens.speak, tokens.listen]]
             mass.append(float(control.exp().sum(-1).mean()))
             p_speak = control.softmax(-1)[:, 0]
@@ -568,11 +613,30 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
     payload = {"metadata": {"model": "online_sft", "tags": objective.tags, "temporal_patch": builder.temporal_patch,
                             "frame_stride": split.frame_stride}, "predictions": rows}
     slot_loss, answer_loss = float(np.mean(slot_losses)), float(np.mean(answer_losses))
+    readiness = sweep(payload, list(taus))
+    # classification: every pair of every question is a prefix, ready (1) from the target pair on, scored by p_k;
+    # AUROC / AUPRC over all of them, accuracy / precision / recall / F1 at p_k >= 0.5, Brier, BCE (eval/metrics.py).
     summary = {"count": len(rows), "loss": slot_loss + objective.answer_weight * answer_loss, "slot_loss": slot_loss,
                "answer_loss": answer_loss, "control_mass": float(np.mean(mass)),
                **{f"{name}_accuracy": float(np.mean(values)) for name, values in at.items()},
-               "online": sweep(payload, list(taus))["results"]}
+               "latency_accuracy": readiness["latency_accuracy"],
+               "classification": readiness["classification"], "online": readiness["results"]}
     return summary, payload
+
+
+def _classification_line(values: Mapping[str, Any]) -> str:
+    def show(key):
+        return "-" if values[key] is None else f"{values[key]:.3f}"
+    return (f"prefix readiness: AUROC={show('auroc')} AUPRC={show('auprc')} | at 0.5: F1={show('f1')} "
+            f"precision={show('precision')} recall={show('recall')} accuracy={show('accuracy')} | "
+            f"|k-t*|<=2: BCE={values['binary_cross_entropy_pm2']:.4f} AUROC={show('auroc_pm2')} F1={show('f1_pm2')}")
+
+
+def _latency_line(values: Mapping[str, Any]) -> str:
+    at = " ".join(f"<={budget}:{100 * value:.1f}%" for budget, value in values["accuracy_at"].items())
+    areas = " ".join(f"{key.upper()}={value:.4f}" for key, value in values.items() if key.startswith("auc"))
+    return (f"latency/accuracy: {areas} (all: lateness 0..{values['max_lateness_pairs']:.1f} pairs) | "
+            f"accuracy at mean lateness {at}")
 
 
 def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | None) -> None:
@@ -581,6 +645,8 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
           f"answer {summary['answer_loss']:.4f}) | P(<speak>)+P(<listen>)={summary['control_mass']:.3f}")
     print("  answer accuracy: " + " | ".join(f"{name}={100 * summary[f'{name}_accuracy']:.1f}%"
                                              for name in ("start", "target", "answerable", "end")))
+    print("  " + _latency_line(summary["latency_accuracy"]))
+    print("  " + _classification_line(summary["classification"]))
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2={100 * values['on_target_pm2']:.1f}% "
               f"premature={100 * values['premature_rate']:.1f}% missed={100 * values['missed_rate']:.1f}% "
@@ -591,11 +657,15 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
 
 def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, output_dir: str | Path, device,
                      tokens: ControlTokens, objective: OnlineObjective, evaluate, run_info: Mapping[str, Any],
-                     split_info: Mapping[str, Any] | None = None) -> Path:
+                     split_info: Mapping[str, Any] | None = None, selection: str = "bce_pm2") -> Path:
     """Epochs over ``train_loader``; ``evaluate()`` -> (summary, predictions) before training and after every epoch.
-    ``best`` is the adapter of the lowest validation loss, ``last`` that of the last epoch."""
+    ``best`` is the adapter of the best validation ``selection`` (SELECTIONS, selection_score; a tie keeps the earlier
+    epoch), ``last``
+    that of the last epoch."""
     config.validate()
     objective.validate()
+    if selection not in SELECTIONS:
+        raise ValueError(f"selection must be one of {SELECTIONS}")
     configure_gradient_checkpointing(model, enabled=config.gradient_checkpointing)
     assert_online_isolation(model)
     output_dir = _prepare_output_dir(output_dir, overwrite=config.overwrite)
@@ -613,16 +683,20 @@ def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, 
         arguments["fused"] = True
     optimizer = torch.optim.AdamW(parameters, **arguments)
     loss_fn = partial(online_loss, tokens=tokens, answer_weight=objective.answer_weight)
-    best_epoch, best_loss, global_step = None, None, 0
+    best_epoch, best_score, global_step = None, None, 0
 
     def evaluate_and_save(epoch: int, train_loss: float | None, steps: int, seconds: float, peak: float | None):
-        nonlocal best_epoch, best_loss
+        nonlocal best_epoch, best_score
         summary, predictions = evaluate()
-        is_best = best_loss is None or summary[SELECTION_METRIC] < best_loss
+        score = selection_score(summary, selection)
+        is_best = best_score is None or score > best_score
         if is_best:
-            best_epoch, best_loss = epoch, summary[SELECTION_METRIC]
-            save_online_adapter(model, output_dir / "best", metadata={"epoch": epoch, "selection_metric": SELECTION_METRIC,
-                                                                      "validation_loss": best_loss})
+            best_epoch, best_score = epoch, score
+            areas = {key: value for key, value in summary["latency_accuracy"].items() if key.startswith("auc")}
+            save_online_adapter(model, output_dir / "best", metadata={
+                "epoch": epoch, "selection": selection, "validation_loss": summary["loss"],
+                "validation_bce_pm2": summary["classification"]["binary_cross_entropy_pm2"],
+                "validation_latency_accuracy": areas})
         record = {"epoch": epoch, "train_loss": train_loss, "optimizer_steps": steps, "epoch_duration_seconds": seconds,
                   "peak_gpu_memory_gb": peak, "best_epoch": best_epoch, "is_best_checkpoint": is_best,
                   "validation": summary}
@@ -728,7 +802,7 @@ class OnlineSession:
 def run_online(session: OnlineSession, pairs: Iterable[torch.Tensor], tau: float = 0.5) -> dict[str, Any]:
     """The inference loop: answer at the first pair with p > tau; at the end of the video without it, answer anyway
     (a miss). <listen> is written only when another pair follows: the forced answer comes right after the last pair,
-    as the end-of-video branch of training."""
+    as a training cut at the last pair."""
     probabilities = []
     pairs = iter(pairs)
     pair = next(pairs, None)

@@ -63,6 +63,7 @@ def sweep(payload: dict, thresholds: list[float]) -> dict:
             "metadata": metadata,
             "num_videos": result["num_videos"], "thresholds": thresholds,
             "classification": result["classification"], "results": result["thresholds"],
+            "latency_accuracy": result["latency_accuracy"],
             "temporal_patch": payload["temporal_patch"], "frame_stride": payload["frame_stride"]}
 
 

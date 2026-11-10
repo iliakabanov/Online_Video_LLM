@@ -17,7 +17,8 @@ import torch
 
 import _paths  # noqa: F401  (src/ on the path)
 from lora.lora import clevrer_lora_part_provider
-from lora.online import OnlineObjective, RopeSpec, evaluate_online, load_online_run
+from lora.online import (OnlineObjective, RopeSpec, _classification_line, _latency_line, evaluate_online,
+                         load_online_run)
 from lora.vision_cache import VisionCache, build_vision_cache
 
 REPO = Path(__file__).resolve().parents[1]
@@ -60,6 +61,8 @@ def main() -> None:
         json.dumps(predictions, allow_nan=False) + "\n", encoding="utf-8")
     print(f"{args.part}, adapter {args.adapter}: {metadata['questions']} questions / {metadata['videos']} videos, "
           f"loss {summary['loss']:.4f}, answer at the end {100 * summary['end_accuracy']:.2f}%")
+    print("  " + _latency_line(summary["latency_accuracy"]))
+    print("  " + _classification_line(summary["classification"]))
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2 {100 * values['on_target_pm2']:.1f}%, premature "
               f"{100 * values['premature_rate']:.1f}%, missed {100 * values['missed_rate']:.1f}%, answer "
