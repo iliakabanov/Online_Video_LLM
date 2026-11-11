@@ -165,6 +165,35 @@ def latency_accuracy(probabilities, target_pairs, valid_mask, correct) -> dict:
             "accuracy_at": {str(b): at(b) for b in LATENCY_BUDGETS}, "points": int(len(x))}
 
 
+def best_window_threshold(probabilities, target_pairs, valid_mask, window: int = 2) -> dict:
+    """Порог τ с наибольшей долей вопросов, ответ на которые пришёл в окне |k − t*| <= window (on_target_pm<window>
+    из _threshold_metrics: срабатывание на первой паре с p_k > τ, пропуск — мимо окна).
+
+    Перебор точный: доля меняется только на порогах, где у какого-то вопроса сдвигается пара срабатывания (значения
+    running max его p_k), поэтому она постоянна на интервалах [tau_low, tau_high). Из интервалов с максимумом берётся
+    самый широкий, tau — его середина (внутри интервала любое τ даёт ту же долю)."""
+    hits0, taus, deltas = 0, [], []
+    for p, target, mask in zip(probabilities, target_pairs, valid_mask):
+        n = int(mask.sum())
+        run = np.maximum.accumulate(np.asarray(p[:n], dtype=float))
+        records = np.r_[0, np.flatnonzero(run[1:] > run[:-1]) + 1]  # пары срабатывания при росте τ
+        inside = (np.abs(records - target) <= window).astype(int)
+        hits0 += inside[0]
+        taus.append(run[records]); deltas.append(np.r_[inside[1:], 0] - inside)  # после последней — пропуск
+    tau, delta = np.concatenate(taus), np.concatenate(deltas)
+    order = np.argsort(tau, kind="stable")
+    tau, counts = tau[order], hits0 + np.cumsum(delta[order])
+    last = np.r_[tau[1:] != tau[:-1], True]
+    values = np.r_[hits0, counts[last]]
+    edges = np.clip(np.r_[-np.inf, tau[last], np.inf], 0.0, 1.0)  # интервал j: [edges[j], edges[j + 1])
+    widths = np.diff(edges)
+    # Пустой интервал (p_k ровно 0 или 1 в float32) порогом из (0, 1) не достигается.
+    best = int(np.lexsort((-widths, -np.where(widths > 0, values, -1)))[0])
+    low, high = float(edges[best]), float(edges[best + 1])
+    return {"window": window, "tau": (low + high) / 2, "tau_low": low, "tau_high": high,
+            f"on_target_pm{window}": float(values[best] / len(target_pairs))}
+
+
 def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps,
                        correct=None):
     kinds = {"premature": 0, "early": 0, "on_target": 0, "late": 0, "missed": 0}
@@ -246,7 +275,8 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
             raise ValueError("correct должен содержать по видео массив не короче его valid-части")
     output = {"model": model, "tags": tags, "num_videos": len(p),
               "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {},
-              "latency_accuracy": None if correct is None else latency_accuracy(p, target_pairs, mask, correct)}
+              "latency_accuracy": None if correct is None else latency_accuracy(p, target_pairs, mask, correct),
+              "best_threshold_pm2": best_window_threshold(p, target_pairs, mask, 2)}
     frames_per_pair = temporal_patch * frame_stride
     for tau in taus:
         if not 0 < tau < 1:

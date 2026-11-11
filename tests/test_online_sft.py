@@ -22,6 +22,7 @@ from lora.online import (
     expected_lora_targets,
     online_hidden,
     online_losses,
+    read_resume_state,
     run_online,
     save_online_adapter,
     template,
@@ -388,3 +389,65 @@ def test_training_run_writes_adapters_metrics_and_predictions(online, tmp_path):
     assert info["tokens"] == {"listen": tokens.listen, "speak": tokens.speak}
     assert np.isfinite([line["train_loss"] for line in
                         map(json.loads, (out / "train_steps.jsonl").read_text().splitlines())]).all()
+
+
+def test_a_resumed_run_continues_as_one_run(online, builder, tiny_base, tmp_path):
+    """2 epochs at once equal 1 epoch, then a run resumed from its last/ (LoRA, token rows, AdamW state) for 1 more:
+    the same weights, the epochs numbered on (so epoch 2 draws the cuts of epoch 2), the optimizer steps counted on."""
+    model, tiny, tokens, data, records, cache = online
+    split = ClevrerLoRASplitConfig(num_workers=0, vision_cache=str(cache.path))
+    objective = OnlineObjective()
+
+    def train(m, out, epochs, resume=None):
+        m.train()
+        loader = build_online_loader(records, builder=tiny, split=split, tokens=tokens, spec=RopeSpec.of(m),
+                                     objective=objective, seed=0, batch_size=2)
+
+        def evaluate():
+            return evaluate_online(m, records[:2], builder=tiny, split=split, tokens=tokens, spec=RopeSpec.of(m),
+                                   objective=objective, device="cpu", taus=(0.5,))
+
+        train_online_sft(m, loader, LoRASFTConfig(epochs=epochs, batch_size=2, gradient_accumulation=1),
+                         output_dir=out, device="cpu", tokens=tokens, objective=objective, evaluate=evaluate,
+                         run_info={"init_adapter": None}, resume=resume)
+
+    def trainable(m):
+        return {name: p.detach().clone() for name, p in m.named_parameters() if p.requires_grad}
+
+    start = trainable(model)
+    train(model, tmp_path / "whole", 2)
+    whole = trainable(model)
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if name in start:
+                parameter.copy_(start[name])
+    train(model, tmp_path / "first", 1)
+
+    fresh, again = build_online_model(_config(tiny_base), _RemapBuilder(builder.processor).processor.tokenizer,
+                                      init_adapter=None, local_files_only=True)
+    assert again == tokens
+    with torch.no_grad():  # the base attention that _perturb sharpened in the fixture
+        for layer in fresh.qwen.model.language_model.layers:
+            layer.self_attn.q_proj.base_layer.weight.mul_(6)
+            layer.self_attn.k_proj.base_layer.weight.mul_(6)
+    load_lora_adapter(fresh, tmp_path / "first" / "last")
+    resume = read_resume_state(tmp_path / "first")
+    steps = [json.loads(line) for line in (tmp_path / "first" / "train_steps.jsonl").read_text().splitlines()]
+    assert resume.epoch == 1 and resume.global_step == steps[-1]["global_step"] and resume.optimizer_state is not None
+    train(fresh, tmp_path / "resumed", 1, resume)
+
+    resumed = trainable(fresh)
+    assert resumed.keys() == whole.keys()
+    for name, value in resumed.items():
+        torch.testing.assert_close(value, whole[name], rtol=1e-5, atol=1e-6)
+    out = tmp_path / "resumed"
+    lines = [json.loads(line) for line in (out / "validation_metrics.jsonl").read_text().splitlines()]
+    assert [line["epoch"] for line in lines] == [1, 2]
+    # Its evaluation before training is that of epoch 1 of the first run: the loaded model is the trained one.
+    first, again = (json.loads((run / "predictions_validation_epoch_1.json").read_text())["predictions"]
+                    for run in (tmp_path / "first", out))
+    for a, b in zip(first, again):
+        np.testing.assert_allclose(a["probabilities"], b["probabilities"], rtol=1e-5, atol=1e-6)
+    resumed_steps = [json.loads(line) for line in (out / "train_steps.jsonl").read_text().splitlines()]
+    assert resumed_steps[0]["global_step"] == resume.global_step + 1 and resumed_steps[0]["epoch"] == 2
+    assert json.loads((out / "last" / "sft_metadata.json").read_text())["epoch"] == 2

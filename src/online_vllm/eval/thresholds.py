@@ -63,7 +63,7 @@ def sweep(payload: dict, thresholds: list[float]) -> dict:
             "metadata": metadata,
             "num_videos": result["num_videos"], "thresholds": thresholds,
             "classification": result["classification"], "results": result["thresholds"],
-            "latency_accuracy": result["latency_accuracy"],
+            "latency_accuracy": result["latency_accuracy"], "best_threshold_pm2": result["best_threshold_pm2"],
             "temporal_patch": payload["temporal_patch"], "frame_stride": payload["frame_stride"]}
 
 
@@ -87,6 +87,9 @@ def main():
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    best = result["best_threshold_pm2"]
+    print(f"best on_target_pm2: tau={best['tau']:.6g} (any tau in [{best['tau_low']:.6g}, {best['tau_high']:.6g})) "
+          f"-> {100 * best['on_target_pm2']:.2f}% of {result['num_videos']} questions")
 
 
 if __name__ == "__main__":

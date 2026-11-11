@@ -97,6 +97,7 @@ def selection_score(summary: Mapping[str, Any], selection: str) -> float:
         return -summary["loss"]
     return summary["latency_accuracy"][selection]
 ONLINE_FORMAT = "online_video_llm_online_sft_v1"
+OPTIMIZER_FILE = "optimizer.pt"  # AdamW state in last/, to resume a run (resume_online_run)
 
 
 @dataclass(frozen=True)
@@ -619,7 +620,7 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
     summary = {"count": len(rows), "loss": slot_loss + objective.answer_weight * answer_loss, "slot_loss": slot_loss,
                "answer_loss": answer_loss, "control_mass": float(np.mean(mass)),
                **{f"{name}_accuracy": float(np.mean(values)) for name, values in at.items()},
-               "latency_accuracy": readiness["latency_accuracy"],
+               "latency_accuracy": readiness["latency_accuracy"], "best_threshold_pm2": readiness["best_threshold_pm2"],
                "classification": readiness["classification"], "online": readiness["results"]}
     return summary, payload
 
@@ -639,6 +640,11 @@ def _latency_line(values: Mapping[str, Any]) -> str:
             f"accuracy at mean lateness {at}")
 
 
+def _best_threshold_line(values: Mapping[str, Any]) -> str:
+    return (f"best tau for on_target_pm2: {values['tau']:.6g} (any in [{values['tau_low']:.6g}, "
+            f"{values['tau_high']:.6g})) -> {100 * values['on_target_pm2']:.1f}%")
+
+
 def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | None) -> None:
     loss = "-" if train_loss is None else f"{train_loss:.4f}"
     print(f"Epoch {epoch} | train_loss={loss} | val_loss={summary['loss']:.4f} (slots {summary['slot_loss']:.4f}, "
@@ -647,6 +653,7 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
                                              for name in ("start", "target", "answerable", "end")))
     print("  " + _latency_line(summary["latency_accuracy"]))
     print("  " + _classification_line(summary["classification"]))
+    print("  " + _best_threshold_line(summary["best_threshold_pm2"]))
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2={100 * values['on_target_pm2']:.1f}% "
               f"premature={100 * values['premature_rate']:.1f}% missed={100 * values['missed_rate']:.1f}% "
@@ -657,15 +664,20 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
 
 def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, output_dir: str | Path, device,
                      tokens: ControlTokens, objective: OnlineObjective, evaluate, run_info: Mapping[str, Any],
-                     split_info: Mapping[str, Any] | None = None, selection: str = "bce_pm2") -> Path:
-    """Epochs over ``train_loader``; ``evaluate()`` -> (summary, predictions) before training and after every epoch.
-    ``best`` is the adapter of the best validation ``selection`` (SELECTIONS, selection_score; a tie keeps the earlier
-    epoch), ``last``
-    that of the last epoch."""
+                     split_info: Mapping[str, Any] | None = None, selection: str = "bce_pm2",
+                     resume: OnlineResume | None = None) -> Path:
+    """``config.epochs`` epochs over ``train_loader``; ``evaluate()`` -> (summary, predictions) before training and after
+    every epoch. ``best`` is the adapter of the best validation ``selection`` (SELECTIONS, selection_score; a tie keeps
+    the earlier epoch), ``last`` that of the last epoch, with the optimizer state (optimizer.pt) to resume from.
+
+    ``resume`` continues a run (resume_online_run): the epochs are numbered on from its epoch, so that the training
+    cuts s of every epoch are new (they are drawn per epoch number), the evaluation before training is recorded under
+    its epoch, and AdamW continues from its state when the adapter has one (else its moments start at zero)."""
     config.validate()
     objective.validate()
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be one of {SELECTIONS}")
+    first_epoch = 1 if resume is None else resume.epoch + 1
     configure_gradient_checkpointing(model, enabled=config.gradient_checkpointing)
     assert_online_isolation(model)
     output_dir = _prepare_output_dir(output_dir, overwrite=config.overwrite)
@@ -682,8 +694,13 @@ def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, 
     if cuda:
         arguments["fused"] = True
     optimizer = torch.optim.AdamW(parameters, **arguments)
+    if resume is not None and resume.optimizer_state is not None:
+        optimizer.load_state_dict(resume.optimizer_state)
+        for group in optimizer.param_groups:  # the loaded groups carry the old settings: these may differ
+            group.update(lr=config.learning_rate, betas=config.betas, weight_decay=config.weight_decay)
     loss_fn = partial(online_loss, tokens=tokens, answer_weight=objective.answer_weight)
-    best_epoch, best_score, global_step = None, None, 0
+    best_epoch, best_score = None, None
+    global_step = 0 if resume is None else resume.global_step
 
     def evaluate_and_save(epoch: int, train_loss: float | None, steps: int, seconds: float, peak: float | None):
         nonlocal best_epoch, best_score
@@ -706,8 +723,8 @@ def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, 
             json.dumps(predictions, allow_nan=False) + "\n", encoding="utf-8")
         _print_summary(epoch, summary, train_loss)
 
-    evaluate_and_save(0, None, 0, 0.0, None)
-    for epoch in range(1, config.epochs + 1):
+    evaluate_and_save(first_epoch - 1, None, 0, 0.0, None)
+    for epoch in range(first_epoch, first_epoch + config.epochs):
         _set_epoch(train_loader, epoch)
         model.train()
         if cuda:
@@ -723,8 +740,43 @@ def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, 
             for step in step_records:
                 file.write(json.dumps(step, allow_nan=False) + "\n")
         evaluate_and_save(epoch, mean_loss, steps, time.perf_counter() - started, peak)
-        save_online_adapter(model, output_dir / "last", metadata={"epoch": epoch, "train_loss": mean_loss})
+        last = save_online_adapter(model, output_dir / "last", metadata={
+            "epoch": epoch, "train_loss": mean_loss, "global_step": global_step})
+        torch.save(optimizer.state_dict(), last / OPTIMIZER_FILE)
     return output_dir / "best"
+
+
+@dataclass(frozen=True)
+class OnlineResume:
+    """Where a resumed run continues: the epoch of the adapter, the optimizer steps up to it, AdamW's state (None when
+    the adapter has none: best/, or a run from before optimizer.pt was saved)."""
+
+    epoch: int
+    global_step: int
+    optimizer_state: Mapping[str, Any] | None
+
+
+def resume_online_run(run_dir: str | Path, adapter: str = "last", *, local_files_only: bool = False,
+                      device: str | None = None):
+    """The model of ``<run>/<adapter>`` ready to train on (load_online_run) and where to continue. Returns (model,
+    builder, tokens, info of online.json, OnlineResume)."""
+    model, builder, tokens, info = load_online_run(run_dir, adapter, local_files_only=local_files_only, device=device)
+    return model.train(), builder, tokens, info, read_resume_state(run_dir, adapter)
+
+
+def read_resume_state(run_dir: str | Path, adapter: str = "last") -> OnlineResume:
+    """Epoch, optimizer steps and AdamW state of ``<run>/<adapter>``."""
+    run_dir = Path(run_dir)
+    metadata = json.loads((run_dir / adapter / "sft_metadata.json").read_text(encoding="utf-8"))
+    epoch = int(metadata["epoch"])
+    global_step = metadata.get("global_step")
+    if global_step is None:  # adapters saved before global_step was: the optimizer steps logged up to its epoch
+        steps = run_dir / "train_steps.jsonl"
+        logged = [json.loads(line) for line in steps.read_text(encoding="utf-8").splitlines()] if steps.exists() else []
+        global_step = max((step["global_step"] for step in logged if step["epoch"] <= epoch), default=0)
+    state = run_dir / adapter / OPTIMIZER_FILE
+    optimizer_state = torch.load(state, map_location="cpu", weights_only=True) if state.exists() else None
+    return OnlineResume(epoch, int(global_step), optimizer_state)
 
 
 # ---------------------------------------------------------------------------------------------------------- inference

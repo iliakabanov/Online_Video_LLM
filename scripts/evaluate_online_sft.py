@@ -17,8 +17,9 @@ import torch
 
 import _paths  # noqa: F401  (src/ on the path)
 from lora.lora import clevrer_lora_part_provider
-from lora.online import (OnlineObjective, RopeSpec, _classification_line, _latency_line, evaluate_online,
-                         load_online_run)
+from lora.online import (OnlineObjective, RopeSpec, _best_threshold_line, _classification_line, _latency_line,
+                         evaluate_online, load_online_run)
+from online_vllm.eval.thresholds import sweep
 from lora.vision_cache import VisionCache, build_vision_cache
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,6 +37,13 @@ def main() -> None:
     args = parser.parse_args()
 
     run = Path(args.run)
+    taus = list(args.taus or json.loads((run / "online.json").read_text(encoding="utf-8"))["taus"])
+    # The threshold of the largest on_target_pm2 on the validation half at the epoch of this adapter: applied to the
+    # test half it gives an honest number (the best threshold of the test half itself is an upper bound).
+    epoch = json.loads((run / args.adapter / "sft_metadata.json").read_text(encoding="utf-8"))["epoch"]
+    validation_predictions = run / f"predictions_validation_epoch_{epoch}.json"
+    validation_best = sweep(json.loads(validation_predictions.read_text(encoding="utf-8")), [0.5])["best_threshold_pm2"]
+    taus.append(validation_best["tau"])
     model, builder, tokens, info = load_online_run(run, args.adapter, local_files_only=args.local_files_only,
                                                    device=args.device)
     provider, split = clevrer_lora_part_provider(run, args.part, data_root=args.data_root, builder=builder)
@@ -47,7 +55,10 @@ def main() -> None:
     objective = OnlineObjective(**info["objective"])
     summary, predictions = evaluate_online(model, records, builder=builder, split=split, tokens=tokens,
                                            spec=RopeSpec.of(model), objective=objective, device=args.device,
-                                           taus=args.taus or info["taus"], desc=f"{args.part}, adapter {args.adapter}")
+                                           taus=taus, desc=f"{args.part}, adapter {args.adapter}")
+    validation_tau = summary["online"][str(validation_best["tau"])]
+    summary["validation_threshold_pm2"] = {"epoch": epoch, "validation": validation_best,
+                                           f"{args.part}_on_target_pm2": validation_tau["on_target_pm2"]}
     metadata = {"run": str(run), "adapter": args.adapter, "split": args.part, "questions": len(records),
                 "videos": len({record.video for record in records})}
     adapter_metadata = run / args.adapter / "sft_metadata.json"
@@ -63,6 +74,9 @@ def main() -> None:
           f"loss {summary['loss']:.4f}, answer at the end {100 * summary['end_accuracy']:.2f}%")
     print("  " + _latency_line(summary["latency_accuracy"]))
     print("  " + _classification_line(summary["classification"]))
+    print(f"  tau of the best validation on_target_pm2 (epoch {epoch}): {validation_best['tau']:.6g} -> validation "
+          f"{100 * validation_best['on_target_pm2']:.1f}%, {args.part} {100 * validation_tau['on_target_pm2']:.1f}%")
+    print(f"  ({args.part} itself: " + _best_threshold_line(summary["best_threshold_pm2"]) + ", an upper bound)")
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2 {100 * values['on_target_pm2']:.1f}%, premature "
               f"{100 * values['premature_rate']:.1f}%, missed {100 * values['missed_rate']:.1f}%, answer "

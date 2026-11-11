@@ -69,7 +69,21 @@ Qwen, дообученная офлайн отвечать на вопрос п�
 python scripts/train_online_sft.py --init-run outputs/lora_sft --output outputs/online_sft --tags hard
 python scripts/train_online_sft.py --init-run outputs/lora_sft --output outputs/online_sft_sigmoid --tags sigmoid
 python scripts/evaluate_online_sft.py --run outputs/online_sft --adapter best         # test-половина
+python scripts/train_online_sft.py --resume-run outputs/online_sft --output outputs/online_sft_e6 --epochs 3
 ```
+
+- **Продолжение прогона** (`--resume-run`): обучение продолжается с `last/` прогона (`--resume-adapter`) в новый
+  `--output`, ещё `--epochs` эпох.
+  - Модель, данные (тот же список видео из `split.json`), цель и оптимизация берутся из прогона. Любой флаг можно
+    переопределить, например `--lr`.
+  - Эпохи нумеруются дальше: после эпохи 3 идут 4, 5, 6. Поэтому обрывы s новые: они выбираются по номеру эпохи.
+  - Валидация до обучения записывается под эпохой адаптера и должна повторить её метрики.
+  - `best/` выбирается среди этой эпохи и новых.
+  - AdamW продолжает со своего состояния (`last/optimizer.pt`). У прогонов, сохранённых до появления этого файла, и при
+    `--resume-adapter best` моменты начинаются с нуля. Lr постоянный, так что это единственное отличие от непрерывного
+    обучения.
+  - Проверено тестом `test_a_resumed_run_continues_as_one_run`: 2 эпохи подряд дают те же веса, что 1 эпоха и
+    продолжение на 1 эпоху.
 
 - **Train — те же видео, что у офлайн-адаптера:** первые n видео `train_group1_lora.jsonl` (`data.train_videos` в его
   `split.json`; для `lora1000` — 1 000 видео). `--train-videos k` берёт первые k. `--skip-offline-videos` вместо них
@@ -122,7 +136,7 @@ python scripts/evaluate_online_sft.py --run outputs/online_sft --adapter best   
 
 | файл | что |
 |---|---|
-| `best/`, `last/` | адаптер: LoRA и две строки токенов. `best` — по `--selection` (по умолчанию `bce_pm2`) |
+| `best/`, `last/` | адаптер: LoRA и две строки токенов. `best` — по `--selection` (по умолчанию `bce_pm2`). В `last/` ещё `optimizer.pt` — состояние AdamW для `--resume-run` |
 | `online.json` | офлайн-адаптер, id токенов, цели слотов, пороги: всё, чтобы пересобрать модель (`load_online_run`) |
 | `model.yaml`, `split.json`, `sft_config.json` | настройки модели, данные и половины validation/test, оптимизация |
 | `validation_metrics.jsonl` | по эпохе (0 — до обучения): loss (слоты, ответ), P(`<speak>`)+P(`<listen>`) на слотах, точность ответа в начале / на t* / в s / в конце, кривая «задержка — точность» (`latency_accuracy`), классификация префиксов по готовности (`classification`: все пары всех вопросов, метка 1 начиная с t*, скор p_k; AUROC, AUPRC, а при p_k ≥ 0,5 F1, precision, recall, accuracy; Brier, BCE), онлайн-метрики при каждом τ |
