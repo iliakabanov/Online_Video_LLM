@@ -24,6 +24,7 @@ from lora.online import (
     online_hidden,
     online_losses,
     read_resume_state,
+    records_of_head_split,
     records_of_predictions,
     run_online,
     save_online_adapter,
@@ -414,6 +415,20 @@ def test_questions_of_another_models_predictions(online):
         check_same_questions(shorter, chosen, builder=tiny, split=split)
     with pytest.raises(ValueError, match="not in the records"):
         records_of_predictions(predictions, records[1:])
+
+
+def test_questions_of_a_heads_split(online):
+    """--records-from <split.json of a head>: every question of the videos of its half, as many as the head counted."""
+    model, tiny, tokens, data, records, cache = online
+    split = ClevrerLoRASplitConfig(num_workers=0, vision_cache=str(cache.path))
+    videos = sorted({record.video for record in records})
+    expected = [record for record in records if record.video == videos[-1]]
+    info = {"validation_videos": videos[:-1], "test_videos": videos[-1:],
+            "validation_questions": len(records) - len(expected), "test_questions": len(expected)}
+    chosen = records_of_head_split(info, "test", records, builder=tiny, split=split)
+    assert [r.id for r in chosen] == [r.id for r in expected]
+    with pytest.raises(ValueError, match="other records or labels"):
+        records_of_head_split({**info, "test_questions": len(expected) + 1}, "test", records, builder=tiny, split=split)
 
 
 def test_a_resumed_run_continues_as_one_run(online, builder, tiny_base, tmp_path):

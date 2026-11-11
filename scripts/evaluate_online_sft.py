@@ -9,7 +9,9 @@ eval/readiness_plot.py (tau = 0.5 is the native rule P(<speak>) > P(<listen>)).
 --records-from evaluates instead exactly the questions of another model's predictions file, e.g. the test half of a
 readiness head (uhead.evaluate: predictions_test_best_tau<tau>.json), taken from --records (default the features half
 of the group-1 validation, where the heads' questions come from). The target pair and the number of pairs of every
-question are checked against that file first, so the two models are compared question by question. --name names the
+question are checked against that file first, so the two models are compared question by question. --records-from may
+also be the split.json of the head (uhead.train, in its checkpoint directory): the questions of its --records-part
+half, without a predictions file of the head. --name names the
 output: <run>/<name>_<adapter>.json, predictions_<name>_<adapter>.json. Videos missing from the vision cache are
 encoded first.
 
@@ -34,7 +36,8 @@ import torch
 import _paths  # noqa: F401  (src/ on the path)
 from lora.lora import ClevrerLoRASplitConfig, clevrer_lora_part_provider
 from lora.online import (OnlineObjective, RopeSpec, _best_threshold_line, _classification_line, _latency_line,
-                         check_same_questions, evaluate_online, load_online_run, records_of_predictions)
+                         check_same_questions, evaluate_online, load_online_run, records_of_head_split,
+                         records_of_predictions)
 from online_vllm.data.schema import load_jsonl
 from online_vllm.eval.metrics import THRESHOLD_WINDOWS
 from online_vllm.eval.thresholds import sweep
@@ -62,7 +65,10 @@ def main() -> None:
     parser.add_argument("--adapter", choices=("best", "last"), default="best")
     parser.add_argument("--part", choices=("test", "validation"), default="test",
                         help="half of the run's LoRA validation videos (without --records-from)")
-    parser.add_argument("--records-from", help="predictions file of another model: evaluate exactly its questions")
+    parser.add_argument("--records-from", help="predictions file of another model (evaluate exactly its questions) or "
+                                               "split.json of a readiness head (its --records-part half)")
+    parser.add_argument("--records-part", choices=("validation", "test"), default="test",
+                        help="half of a head's split.json given as --records-from")
     parser.add_argument("--records", default=HEAD_RECORDS,
                         help=f"dataset file of the --records-from questions, relative to --data-root ({HEAD_RECORDS})")
     parser.add_argument("--name", help="output name (default: --part; required with --records-from)")
@@ -94,8 +100,13 @@ def main() -> None:
     if args.records_from:
         reference = _read(Path(args.records_from))
         split = _run_split(run)
-        records = records_of_predictions(reference, load_jsonl(Path(args.data_root) / args.records))
-        check_same_questions(reference, records, builder=builder, split=split)
+        dataset = load_jsonl(Path(args.data_root) / args.records)
+        if "predictions" in reference:
+            records = records_of_predictions(reference, dataset)
+            check_same_questions(reference, records, builder=builder, split=split)
+        else:  # split.json of uhead.train
+            records = records_of_head_split(reference, args.records_part, dataset, builder=builder, split=split)
+            metadata["records_part"] = args.records_part
         metadata.update(records_from=args.records_from, records=args.records)
     else:
         provider, split = clevrer_lora_part_provider(run, args.part, data_root=args.data_root, builder=builder)

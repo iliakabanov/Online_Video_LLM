@@ -127,6 +127,12 @@ python scripts/evaluate_online_sft.py --run outputs/online_sft --name head_test 
 
 Без `--tau-from` τ_val берётся с LoRA-validation прогона.
 
+`--records-from` может быть и `split.json` головы (`checkpoints/<mode>/<arch>/<id>/`). Тогда берутся вопросы половины
+`--records-part`, и файл предсказаний головы не нужен.
+
+Весь эксперимент целиком: `experiment_launcher/listen/compare_head.sh <arch>/<id>`. С `ONLINE_ONLY=1` он делает только
+оценку онлайн-модели.
+
 **Критерий порога** (`--tau-criterion`):
 
 - по умолчанию `on_time_0_4` — наибольшая доля вопросов, ответ на которые пришёл с задержкой 0–4 пары после целевой

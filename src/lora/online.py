@@ -584,6 +584,24 @@ def records_of_predictions(predictions: Mapping[str, Any], records: Iterable[Rec
     return [by_id[record_id] for record_id in ids]
 
 
+def records_of_head_split(split_info: Mapping[str, Any], part: str, records: Iterable[Record], *,
+                          builder: InputBuilder, split: ClevrerLoRASplitConfig) -> list[Record]:
+    """The questions of the validation or test half of a readiness head from its split.json (uhead.train): every
+    question of its videos that has a target pair (uhead/data.py labelled drops the others), in the order of the
+    records; as many as the head counted, so no predictions file of the head is needed."""
+    from online_vllm.data.labels import plan
+    if part not in ("validation", "test"):
+        raise ValueError("part must be validation or test")
+    videos = set(split_info[f"{part}_videos"])
+    chosen = [record for record in records if record.video in videos
+              and plan(record, split.frame_stride, split.speak_delay, builder.temporal_patch) is not None]
+    expected = split_info[f"{part}_questions"]
+    if len(chosen) != expected or len({record.video for record in chosen}) != len(videos):
+        raise ValueError(f"{len(chosen)} questions of {len({r.video for r in chosen})} videos in the records, the head's "
+                         f"{part} half has {expected} of {len(videos)}: other records or labels than the head's")
+    return chosen
+
+
 def check_same_questions(predictions: Mapping[str, Any], records: Sequence[Record], *, builder: InputBuilder,
                          split: ClevrerLoRASplitConfig) -> None:
     """Before evaluating: every question has the target pair and the number of pairs that the other model's
