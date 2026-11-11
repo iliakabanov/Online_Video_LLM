@@ -109,6 +109,8 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, help="DataLoader workers (default: as the offline run)")
     parser.add_argument("--vision-cache", help="vision cache directory (default: that of the offline run)")
     parser.add_argument("--seed", type=int, help=f"default {defaults.seed}")
+    parser.add_argument("--save-every-epoch", action=argparse.BooleanOptionalAction, default=True,
+                        help="also save the adapter of every epoch as epoch_<n>/ (~ the size of best/)")
     parser.add_argument("--overwrite", action="store_true", help="delete a nonempty output directory for a new run")
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
@@ -216,7 +218,7 @@ def main() -> None:
                      split_info={"data": asdict(split), **info,
                                  "online_train": {"skipped_offline_videos": skip, "videos": len(train_videos),
                                                   "questions": len(train), "train_videos": train_videos}},
-                     resume=resume)
+                     resume=resume, save_every_epoch=args.save_every_epoch)
 
 
 if __name__ == "__main__":

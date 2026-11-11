@@ -212,6 +212,88 @@ def best_window_threshold(probabilities, target_pairs, valid_mask, window: int |
             "tau_high": high, metric: float(values[best] / len(target_pairs))}
 
 
+# Задержка пары «модель ответов — детектор» при ограничениях: доля преждевременных ответов (раньше t*) не больше
+# бюджета R и точность среди непреждевременных ответов не ниже уровня A (constrained_latency).
+PREMATURE_BUDGETS = (0.05, 0.10)
+ACCURACY_LEVELS = (0.85, 0.88)
+
+
+def constraint_key(budget: float, level: float) -> str:
+    return f"R{budget:g}_A{level:g}"
+
+
+def operating_point(probabilities, target_pairs, valid_mask, correct, tau: float) -> dict:
+    """Пара «модель — детектор» при пороге τ: ответ на первой паре k с p_k > τ, без такой пары — принудительно на
+    последней (forced). Преждевременный ответ (k < t*) — ошибка при любой его верности; точность, задержка k − t* (в
+    парах; среднее и медиана) — по непреждевременным ответам, включая принудительные."""
+    target = np.asarray(target_pairs)
+    fired, forced, right = [], [], []
+    for p, mask, c in zip(probabilities, valid_mask, correct):
+        n = int(np.asarray(mask).sum())
+        hits = np.flatnonzero(np.asarray(p[:n], dtype=float) > tau)
+        k = int(hits[0]) if len(hits) else n - 1
+        fired.append(k); forced.append(not len(hits)); right.append(bool(c[k]))
+    fired, forced, right = np.asarray(fired), np.asarray(forced), np.asarray(right)
+    timely = fired >= target
+    delay = (fired - target)[timely]
+    return {"tau": float(tau), "premature_rate": float((~timely).mean()),
+            "accuracy": float(right[timely].mean()) if timely.any() else None,
+            "timely_correct": float((right & timely).mean()), "forced_rate": float(forced.mean()),
+            "latency_mean": float(delay.mean()) if len(delay) else None,
+            "latency_median": float(np.median(delay)) if len(delay) else None}
+
+
+def constrained_latency(probabilities, target_pairs, valid_mask, correct, budgets: Sequence[float] = PREMATURE_BUDGETS,
+                        levels: Sequence[float] = ACCURACY_LEVELS) -> dict:
+    """Для каждого бюджета R и уровня A: порог τ с наименьшей средней задержкой среди τ, где доля преждевременных
+    ответов <= R и точность непреждевременных >= A (operating_point). Кривая по τ точная: доли меняются только на
+    порогах, где у какого-то вопроса сдвигается пара ответа (значения running max p_k), поэтому всё постоянно на
+    интервалах [tau_low, tau_high); tau — середина выбранного интервала (при равной задержке — самого широкого).
+    Если ни один τ не проходит ограничения — feasible false и лучшая точность, достижимая при доле <= R."""
+    count = len(target_pairs)
+    start = np.zeros(3)  # преждевременные, сумма задержек и верные среди непреждевременных при τ ниже всех событий
+    taus, deltas = [], []
+    for p, target, mask, c in zip(probabilities, target_pairs, valid_mask, correct):
+        n = int(np.asarray(mask).sum())
+        run = np.maximum.accumulate(np.asarray(p[:n], dtype=float))
+        records = np.r_[0, np.flatnonzero(run[1:] > run[:-1]) + 1]  # пара ответа до события
+        after = np.r_[records[1:], n - 1]  # и после: τ дошёл до run[record]
+        c = np.asarray(c[:n], dtype=bool)
+
+        def state(k):
+            timely = k >= target
+            return np.stack([~timely, np.where(timely, k - target, 0), timely & c[k]], axis=1).astype(float)
+
+        start += state(np.array([0]))[0]
+        taus.append(run[records]); deltas.append(state(after) - state(records))
+    tau, delta = np.concatenate(taus), np.concatenate(deltas)
+    order = np.argsort(tau, kind="stable")
+    tau, sums = tau[order], start + np.cumsum(delta[order], axis=0)
+    last = np.r_[tau[1:] != tau[:-1], True]
+    sums = np.vstack([start, sums[last]])  # состояние j — на интервале [edges[j], edges[j + 1])
+    edges = np.clip(np.r_[-np.inf, tau[last], np.inf], 0.0, 1.0)
+    widths = np.diff(edges)
+    premature, timely = sums[:, 0] / count, count - sums[:, 0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        accuracy, latency = sums[:, 2] / timely, sums[:, 1] / timely
+    result = {}
+    for budget in budgets:
+        allowed = (premature <= budget) & (timely > 0) & (widths > 0)
+        for level in levels:
+            feasible = allowed & (accuracy >= level)
+            key = constraint_key(budget, level)
+            if not feasible.any():
+                result[key] = {"premature_budget": budget, "accuracy_level": level, "feasible": False,
+                               "max_accuracy": float(accuracy[allowed].max()) if allowed.any() else None}
+                continue
+            best = int(np.lexsort((-widths, np.where(feasible, latency, np.inf)))[0])
+            low, high = float(edges[best]), float(edges[best + 1])
+            point = operating_point(probabilities, target_pairs, valid_mask, correct, (low + high) / 2)
+            result[key] = {"premature_budget": budget, "accuracy_level": level, "feasible": True,
+                           "tau_low": low, "tau_high": high, **point}
+    return result
+
+
 def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps,
                        correct=None):
     kinds = {"premature": 0, "early": 0, "on_target": 0, "late": 0, "missed": 0}
@@ -301,7 +383,8 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
               "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {},
               "latency_accuracy": None if correct is None else latency_accuracy(p, target_pairs, mask, correct),
               "best_thresholds": {metric: best_window_threshold(p, target_pairs, mask, window)
-                                  for metric, window in THRESHOLD_WINDOWS.items()}}
+                                  for metric, window in THRESHOLD_WINDOWS.items()},
+              "constrained_latency": None if correct is None else constrained_latency(p, target_pairs, mask, correct)}
     frames_per_pair = temporal_patch * frame_stride
     for tau in taus:
         if not 0 < tau < 1:

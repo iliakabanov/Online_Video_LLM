@@ -672,6 +672,7 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
                "answer_loss": answer_loss, "control_mass": float(np.mean(mass)),
                **{f"{name}_accuracy": float(np.mean(values)) for name, values in at.items()},
                "latency_accuracy": readiness["latency_accuracy"], "best_thresholds": readiness["best_thresholds"],
+               "constrained_latency": readiness["constrained_latency"],
                "classification": readiness["classification"], "online": readiness["results"]}
     return summary, payload
 
@@ -697,6 +698,13 @@ def _best_threshold_line(values: Mapping[str, Any]) -> str:
             f"{values['tau_high']:.6g})) -> {100 * values[metric]:.1f}%")
 
 
+def _constrained_line(values: Mapping[str, Any]) -> str:
+    """Задержка (среднее / медиана, пары после t*) при доле преждевременных <= R и точности >= A."""
+    parts = [f"{key}: {point['latency_mean']:.2f}/{point['latency_median']:g}" if point["feasible"] else f"{key}: -"
+             for key, point in values.items()]
+    return "latency mean/median at premature<=R, accuracy>=A: " + " | ".join(parts)
+
+
 def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | None) -> None:
     loss = "-" if train_loss is None else f"{train_loss:.4f}"
     print(f"Epoch {epoch} | train_loss={loss} | val_loss={summary['loss']:.4f} (slots {summary['slot_loss']:.4f}, "
@@ -707,6 +715,7 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
     print("  " + _classification_line(summary["classification"]))
     for best in summary["best_thresholds"].values():
         print("  " + _best_threshold_line(best))
+    print("  " + _constrained_line(summary["constrained_latency"]))
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2={100 * values['on_target_pm2']:.1f}% "
               f"on_time_0_4={100 * values['on_time_0_4']:.1f}% "
@@ -720,10 +729,12 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
 def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, output_dir: str | Path, device,
                      tokens: ControlTokens, objective: OnlineObjective, evaluate, run_info: Mapping[str, Any],
                      split_info: Mapping[str, Any] | None = None, selection: str = "bce_pm2",
-                     resume: OnlineResume | None = None) -> Path:
+                     resume: OnlineResume | None = None, save_every_epoch: bool = True) -> Path:
     """``config.epochs`` epochs over ``train_loader``; ``evaluate()`` -> (summary, predictions) before training and after
     every epoch. ``best`` is the adapter of the best validation ``selection`` (SELECTIONS, selection_score; a tie keeps
-    the earlier epoch), ``last`` that of the last epoch, with the optimizer state (optimizer.pt) to resume from.
+    the earlier epoch), ``last`` that of the last epoch, with the optimizer state (optimizer.pt) to resume from;
+    with ``save_every_epoch`` also ``epoch_<n>`` after every epoch (LoRA and token rows, no optimizer state), so that
+    any epoch can be chosen afterwards by any validation metric.
 
     ``resume`` continues a run (resume_online_run): the epochs are numbered on from its epoch, so that the training
     cuts s of every epoch are new (they are drawn per epoch number), the evaluation before training is recorded under
@@ -795,9 +806,11 @@ def train_online_sft(model, train_loader: DataLoader, config: LoRASFTConfig, *, 
             for step in step_records:
                 file.write(json.dumps(step, allow_nan=False) + "\n")
         evaluate_and_save(epoch, mean_loss, steps, time.perf_counter() - started, peak)
-        last = save_online_adapter(model, output_dir / "last", metadata={
-            "epoch": epoch, "train_loss": mean_loss, "global_step": global_step})
+        metadata = {"epoch": epoch, "train_loss": mean_loss, "global_step": global_step}
+        last = save_online_adapter(model, output_dir / "last", metadata=metadata)
         torch.save(optimizer.state_dict(), last / OPTIMIZER_FILE)
+        if save_every_epoch:
+            save_online_adapter(model, output_dir / f"epoch_{epoch}", metadata=metadata)
     return output_dir / "best"
 
 

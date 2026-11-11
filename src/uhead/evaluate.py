@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from .train import _readiness, _write_predictions, head_config, load_checkpoint, predict
+from .train import THRESHOLD_FREE_KEYS, _readiness, _write_predictions, head_config, load_checkpoint, predict
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,8 @@ def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, 
     summary = {"model": model_name, "feature_groups": head_config(model).groups, **tag_settings,
                "weights": str(run_dir / weights), "threshold": threshold, "questions": len(rows),
                "videos": len(split["test_videos"]), "loss": loss, "classification": result["classification"],
-               "online": result["thresholds"][str(threshold)]}
+               "online": result["thresholds"][str(threshold)],
+               **{key: result[key] for key in THRESHOLD_FREE_KEYS}}
     output = Path(output) if output else (Path(results_dir) if results_dir else run_dir) / \
         f"test_{Path(weights).stem}_tau{threshold}.json"
     output.parent.mkdir(parents=True, exist_ok=True)

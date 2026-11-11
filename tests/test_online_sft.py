@@ -374,6 +374,12 @@ def test_training_run_writes_adapters_metrics_and_predictions(online, tmp_path):
                             output_dir=out, device="cpu", tokens=tokens, objective=objective, evaluate=evaluate,
                             run_info={"init_adapter": None})
     assert best == out / "best" and (out / "last" / "adapter_model.safetensors").exists()
+    # The adapter of every epoch is kept (here the only one is also last/), without the optimizer state.
+    from safetensors.torch import load_file
+    every, last = (load_file(str(out / name / "adapter_model.safetensors")) for name in ("epoch_1", "last"))
+    assert every.keys() == last.keys() and all(torch.equal(every[k], last[k]) for k in every)
+    assert json.loads((out / "epoch_1" / "sft_metadata.json").read_text())["epoch"] == 1
+    assert not (out / "epoch_1" / "optimizer.pt").exists()
     lines = [json.loads(line) for line in (out / "validation_metrics.jsonl").read_text().splitlines()]
     assert [line["epoch"] for line in lines] == [0, 1]
     summary = lines[1]["validation"]

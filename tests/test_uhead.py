@@ -181,6 +181,28 @@ def test_ragged_probabilities_are_right_padded_only_for_evaluation():
     assert mask.tolist() == [[True, True, False], [True, True, True]]
 
 
+def test_results_keep_the_metrics_over_every_threshold():
+    """results.json (validation) и test_*.json (uhead.evaluate) несут те же метрики по всем порогам, что и онлайн-SFT:
+    latency_accuracy, best_thresholds, constrained_latency; всё сериализуется без NaN."""
+    import json
+    from uhead.train import THRESHOLD_FREE_KEYS, _readiness
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(20):
+        n, target = int(rng.integers(6, 12)), int(rng.integers(1, 5))
+        p = np.clip(np.sort(rng.random(n)) + (np.arange(n) >= target) * 0.3, 0, 1)
+        rows.append({"probabilities": p, "target_pair": target, "visible_pair": target, "fps": 25.0,
+                     "answer_correct": (np.arange(n) >= target).tolist()})
+    result = _readiness(rows, [0.5], {"temporal_patch": 2, "frame_stride": 1})
+    assert all(result[key] is not None for key in THRESHOLD_FREE_KEYS)
+    assert {"on_target_pm2", "on_time_0_4"} <= set(result["best_thresholds"])
+    assert "R0.05_A0.85" in result["constrained_latency"]
+    json.dumps({key: result[key] for key in THRESHOLD_FREE_KEYS}, allow_nan=False)
+    without = _readiness([{k: v for k, v in row.items() if k != "answer_correct"} for row in rows], [0.5],
+                         {"temporal_patch": 2, "frame_stride": 1})
+    assert without["latency_accuracy"] is None and without["constrained_latency"] is None
+
+
 def test_feature_rows_does_not_read_unselected_groups():
     class FakeFeatures:
         def __init__(self):

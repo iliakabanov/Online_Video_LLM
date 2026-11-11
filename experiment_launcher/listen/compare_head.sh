@@ -90,6 +90,7 @@ python -m online_vllm.eval.thresholds --predictions "$HEAD_TEST" --output "$OUT/
 # 5. Те же вопросы с теми же целевыми парами и числом пар, затем сводка на test: метрики без порога и при пороге с
 # validation (у обеих моделей — на validation головы).
 ONLINE_TEST="$ONLINE_RUN/${NAME}_test_${ADAPTER}.json" ONLINE_PREDICTIONS="$ONLINE_RUN/predictions_${NAME}_test_${ADAPTER}.json" \
+  ONLINE_VALIDATION="$ONLINE_RUN/predictions_${NAME}_validation_${ADAPTER}.json" HEAD_VALIDATION="$HEAD_VALIDATION" \
   HEAD_TEST_JSON="$OUT/head_test.json" HEAD_PREDICTIONS="$HEAD_TEST" HEAD_TAU="$HEAD_TAU" CRITERION="$CRITERION" \
   OUTPUT="$OUT/comparison.json" HEAD="$MODE/$HEAD" ONLINE="$ONLINE_RUN/$ADAPTER" python - <<'PY'
 import json, os
@@ -155,8 +156,44 @@ for label, part, key in rows:
     pair = {model: value(model, part, key) for model in models}
     table[f"{part}:{key or label}"] = pair
     print(f"{label:34s} " + " ".join("         -" if v is None else f"{v:10.4f}" for v in pair.values()))
+# Задержка пары «модель ответов — детектор» при доле преждевременных <= R и точности непреждевременных >= A
+# (metrics.constrained_latency): τ выбран на validation и применён к test; рядом — та же точка кривой самого test.
+from online_vllm.eval.metrics import constrained_latency, operating_point
+from online_vllm.eval.thresholds import payload_arrays
+
+def arrays(key):
+    data = payload_arrays(load(key))
+    return data["probabilities"], data["target_pairs"], data["valid_mask"], data["correct"]
+
+constrained = {}
+pairs = {"online": ("ONLINE_VALIDATION", "ONLINE_PREDICTIONS"), "head": ("HEAD_VALIDATION", "HEAD_PREDICTIONS")}
+for model, (val_key, test_key) in pairs.items():
+    val, test = arrays(val_key), arrays(test_key)
+    test_curve = constrained_latency(*test)
+    constrained[model] = {}
+    for key, chosen in constrained_latency(*val).items():
+        at_val_tau = operating_point(*test, chosen["tau"]) if chosen["feasible"] else None
+        constrained[model][key] = {"validation": chosen, "test_at_validation_tau": at_val_tau, "test_curve": test_curve[key]}
+
+def show(point):
+    if point is None or not point.get("feasible", True):
+        return f"{'недостижимо':>31s}"
+    if point["accuracy"] is None:  # при этом τ все ответы преждевременные
+        return f"{'-':>6s} {'-':>5s} {100 * point['premature_rate']:6.1f}% {'-':>7s} {point['tau']:6.3f}"
+    return (f"{point['latency_mean']:6.2f} {point['latency_median']:5g} {100 * point['premature_rate']:6.1f}% "
+            f"{100 * point['accuracy']:6.1f}% {point['tau']:6.3f}")
+
+print("\nЗадержка (пары после t*) при доле преждевременных <= R и точности непреждевременных >= A")
+print(f"{'':12s} {'':7s} {'τ с validation → test':^31s} | {'кривая самого test':^31s}")
+print(f"{'R, A':12s} {'модель':7s} {'mean':>6s} {'med':>5s} {'premat':>7s} {'acc':>7s} {'τ':>6s} | "
+      f"{'mean':>6s} {'med':>5s} {'premat':>7s} {'acc':>7s} {'τ':>6s}")
+for key in constrained["online"]:
+    for model in pairs:
+        entry = constrained[model][key]
+        print(f"{key:12s} {model:7s} {show(entry['test_at_validation_tau'])} | {show(entry['test_curve'])}")
+
 json.dump({"online": os.environ["ONLINE"], "head": os.environ["HEAD"], "criterion": criterion,
-           "questions": len(questions[0]), "metrics": table}, open(os.environ["OUTPUT"], "w", encoding="utf-8"),
-          ensure_ascii=False, indent=2)
+           "questions": len(questions[0]), "metrics": table, "constrained_latency": constrained},
+          open(os.environ["OUTPUT"], "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 print(f"-> {os.environ['OUTPUT']}")
 PY

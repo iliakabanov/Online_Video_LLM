@@ -104,6 +104,11 @@ def predict(model, dataset, config, device, batch_size=64, with_rows=True) -> tu
     return total / count, rows
 
 
+# Метрики evaluate_readiness по всем порогам сразу (без выбора τ): кривая «задержка — точность», лучший τ по окнам
+# срабатывания, задержка при ограничениях на преждевременные ответы и точность; None, если нет answer_correct.
+THRESHOLD_FREE_KEYS = ("latency_accuracy", "best_thresholds", "constrained_latency")
+
+
 def _readiness(rows, taus, meta, classification_threshold=0.5, model=None, tags=None) -> dict:
     probabilities, masks = _pad_probabilities([row["probabilities"] for row in rows])
     correct = [row["answer_correct"] for row in rows] if all("answer_correct" in row for row in rows) else None
@@ -303,7 +308,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
         "best_epoch": best_epoch, "best_validation_loss": best_loss,
         "validation": {"questions": len(validation_rows), "videos": len(split["validation_videos"]),
                        "loss": validation_loss, "classification": validation["classification"],
-                       "thresholds": validation["thresholds"]},
+                       "thresholds": validation["thresholds"],
+                       **{key: validation[key] for key in THRESHOLD_FREE_KEYS}},
     }
     (results_dir / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
                                               encoding="utf-8")

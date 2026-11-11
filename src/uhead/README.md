@@ -58,6 +58,14 @@ PYTHONPATH=src python -m uhead.evaluate --run outputs/group1_uhead/hard --thresh
 
 Результат — `test_best_tau0.7.json` (loss, классификационные и онлайн-метрики при этом пороге) и вероятности `predictions_test_best_tau0.7.json`.
 
+В `results.json` (раздел `validation`) и в `test_*.json` есть также метрики сразу по всем порогам, те же, что у онлайн-SFT (`eval/metrics.py`):
+
+- `latency_accuracy` — кривая «задержка — точность»;
+- `best_thresholds` — лучший τ для окон ±2 и 0–4 пары;
+- `constrained_latency` — задержка при доле преждевременных ответов ≤ R и точности ≥ A.
+
+Без `answer_correct` в предсказаниях первое и третье равны `null`.
+
 ## Качество ответа
 
 Ответ модели на паре p — буква с наибольшей вероятностью среди вариантов в пробе «ответь сейчас» замороженной Qwen (`probe_logprob`, `online_vllm/eval/answers.py`). К онлайн-метрикам каждого порога (validation в `results.json`, test в `uhead.evaluate`) добавляются:

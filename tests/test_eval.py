@@ -90,6 +90,36 @@ def test_best_window_threshold_is_the_maximum_over_every_threshold(metric):
         assert best_window_threshold(p, targets, mask, 2) == best
 
 
+def test_constrained_latency_is_the_smallest_mean_latency_over_every_threshold():
+    from online_vllm.eval.metrics import constrained_latency, operating_point
+    rng = np.random.default_rng(3)
+    p = rng.random((60, 16)).round(2)
+    p[0, 0] = 1.0
+    lengths = rng.integers(6, 17, 60)
+    mask = np.arange(16) < lengths[:, None]
+    targets = [int(rng.integers(0, n)) for n in lengths]
+    correct = [rng.random(16) < np.clip(0.4 + 0.1 * (np.arange(16) - t), 0, 1) for t in targets]  # верно чаще после t*
+    budgets, levels = (0.05, 0.3), (0.5, 0.8, 0.99)
+    result = constrained_latency(p, targets, mask, correct, budgets, levels)
+    grid = sorted({*np.unique(p[mask]), *(np.unique(p[mask]) + 0.005)} - {0.0, 1.0})
+    points = [operating_point(p, targets, mask, correct, tau) for tau in grid if 0 < tau < 1]
+    for budget in budgets:
+        for level in levels:
+            got = result[f"R{budget:g}_A{level:g}"]
+            ok = [q for q in points if q["premature_rate"] <= budget and q["accuracy"] is not None
+                  and q["accuracy"] >= level]
+            assert got["feasible"] == bool(ok)
+            if ok:
+                assert got["latency_mean"] == pytest.approx(min(q["latency_mean"] for q in ok))
+                assert got["premature_rate"] <= budget and got["accuracy"] >= level
+                assert got["tau_low"] <= got["tau"] < got["tau_high"]
+    # Преждевременный ответ — ошибка при любой верности: точность и задержка только по ответам с k >= t*.
+    point = operating_point(np.array([[0.9, 0.1, 0.1, 0.1], [0.1, 0.1, 0.9, 0.1], [0.1, 0.1, 0.1, 0.1]]), [2, 1, 1],
+                            np.ones((3, 4), bool), [np.ones(4, bool)] * 3, 0.5)
+    assert point["premature_rate"] == pytest.approx(1 / 3) and point["accuracy"] == 1.0
+    assert point["forced_rate"] == pytest.approx(1 / 3) and point["latency_mean"] == pytest.approx((1 + 2) / 2)
+
+
 def test_on_time_0_4_counts_answers_from_the_target_pair_to_4_pairs_after_it():
     # Target pair 5; first firing at pairs 3 (premature), 5, 9 (4 late), 10 (5 late) and never.
     p = np.full((5, 12), 0.1)

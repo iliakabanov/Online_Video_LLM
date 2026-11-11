@@ -62,7 +62,8 @@ def _run_split(run: Path) -> ClevrerLoRASplitConfig:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", required=True, help="output directory of train_online_sft.py")
-    parser.add_argument("--adapter", choices=("best", "last"), default="best")
+    parser.add_argument("--adapter", default="best", help="best, last or epoch_<n> (train_online_sft.py "
+                                                          "--save-every-epoch)")
     parser.add_argument("--part", choices=("test", "validation"), default="test",
                         help="half of the run's LoRA validation videos (without --records-from)")
     parser.add_argument("--records-from", help="predictions file of another model (evaluate exactly its questions) or "

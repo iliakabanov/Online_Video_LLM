@@ -3,6 +3,8 @@ import argparse
 import json
 from pathlib import Path
 
+import numpy as np
+
 from .metrics import evaluate_readiness
 
 
@@ -23,6 +25,20 @@ def resolve_thresholds(values=None, start=None, stop=None, step=None):
     if not result or any(not 0 < value < 1 for value in result):
         raise ValueError("Все пороги должны лежать строго в (0, 1)")
     return result
+
+
+def payload_arrays(payload: dict) -> dict:
+    """Массивы файла предсказаний (eval/export.py) для функций metrics.py: probabilities с right-padding, valid_mask,
+    target_pairs, correct (answer_correct; None, если его нет)."""
+    rows = payload["predictions"]
+    width = max(len(row["probabilities"]) for row in rows)
+    probabilities, valid_mask = np.zeros((len(rows), width)), np.zeros((len(rows), width), dtype=bool)
+    for i, row in enumerate(rows):
+        n = len(row["probabilities"])
+        probabilities[i, :n], valid_mask[i, :n] = row["probabilities"], True
+    correct = [row["answer_correct"] for row in rows] if all("answer_correct" in row for row in rows) else None
+    return {"probabilities": probabilities, "valid_mask": valid_mask,
+            "target_pairs": [row["target_pair"] for row in rows], "correct": correct}
 
 
 def sweep(payload: dict, thresholds: list[float]) -> dict:
@@ -64,6 +80,7 @@ def sweep(payload: dict, thresholds: list[float]) -> dict:
             "num_videos": result["num_videos"], "thresholds": thresholds,
             "classification": result["classification"], "results": result["thresholds"],
             "latency_accuracy": result["latency_accuracy"], "best_thresholds": result["best_thresholds"],
+            "constrained_latency": result["constrained_latency"],
             "temporal_patch": payload["temporal_patch"], "frame_stride": payload["frame_stride"]}
 
 
@@ -90,6 +107,11 @@ def main():
     for metric, best in result["best_thresholds"].items():
         print(f"best {metric}: tau={best['tau']:.6g} (any tau in [{best['tau_low']:.6g}, {best['tau_high']:.6g})) "
               f"-> {100 * best[metric]:.2f}% of {result['num_videos']} questions")
+    for key, point in (result["constrained_latency"] or {}).items():
+        print(f"{key}: " + (f"tau={point['tau']:.6g} latency mean {point['latency_mean']:.2f} / median "
+                            f"{point['latency_median']:g} pairs, premature {100 * point['premature_rate']:.1f}%, "
+                            f"accuracy {100 * point['accuracy']:.1f}%" if point["feasible"] else
+                            f"infeasible (best accuracy under the budget {point['max_accuracy']})"))
 
 
 if __name__ == "__main__":
