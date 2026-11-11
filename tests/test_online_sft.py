@@ -16,6 +16,7 @@ from lora.online import (
     build_example,
     build_online_loader,
     build_online_model,
+    check_same_questions,
     collate_online,
     encode_pair,
     evaluate_online,
@@ -23,6 +24,7 @@ from lora.online import (
     online_hidden,
     online_losses,
     read_resume_state,
+    records_of_predictions,
     run_online,
     save_online_adapter,
     template,
@@ -389,6 +391,29 @@ def test_training_run_writes_adapters_metrics_and_predictions(online, tmp_path):
     assert info["tokens"] == {"listen": tokens.listen, "speak": tokens.speak}
     assert np.isfinite([line["train_loss"] for line in
                         map(json.loads, (out / "train_steps.jsonl").read_text().splitlines())]).all()
+
+
+def test_questions_of_another_models_predictions(online):
+    """--records-from of evaluate_online_sft.py: the questions of a predictions file in its order, checked against it
+    (target pair, number of pairs) before the evaluation."""
+    model, tiny, tokens, data, records, cache = online
+    split = ClevrerLoRASplitConfig(num_workers=0, vision_cache=str(cache.path))
+    _, predictions = evaluate_online(model, records, builder=tiny, split=split, tokens=tokens,
+                                     spec=RopeSpec.of(model), objective=OnlineObjective(), device="cpu", taus=(0.5,))
+    other = {"predictions": predictions["predictions"][::-1][:-1]}  # another order, one question fewer
+    chosen = records_of_predictions(other, records)
+    assert [r.id for r in chosen] == [row["record_id"] for row in other["predictions"]]
+    check_same_questions(other, chosen, builder=tiny, split=split)
+    shifted = {"predictions": [dict(row) for row in other["predictions"]]}
+    shifted["predictions"][0]["target_pair"] += 1
+    with pytest.raises(ValueError, match="differ from the predictions"):
+        check_same_questions(shifted, chosen, builder=tiny, split=split)
+    shorter = {"predictions": [dict(row) for row in other["predictions"]]}
+    shorter["predictions"][-1]["probabilities"] = shorter["predictions"][-1]["probabilities"][:-1]
+    with pytest.raises(ValueError, match="differ from the predictions"):
+        check_same_questions(shorter, chosen, builder=tiny, split=split)
+    with pytest.raises(ValueError, match="not in the records"):
+        records_of_predictions(predictions, records[1:])
 
 
 def test_a_resumed_run_continues_as_one_run(online, builder, tiny_base, tmp_path):

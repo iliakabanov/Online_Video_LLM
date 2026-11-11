@@ -106,6 +106,42 @@ python scripts/train_online_sft.py --resume-run outputs/online_sft --output outp
 - **Память:** обучающая последовательность — офлайн-префикс плюс s токенов `<listen>`. Если батч не помещается,
   используйте `--batch-size 1 --gradient-accumulation 4` или `--gradient-checkpointing`.
 
+## Сравнение с головами на одних вопросах
+
+Test головы взят из `val_group1_features.jsonl`, а test онлайн-модели — из `val_group1_lora.jsonl`. Это разные видео.
+Поэтому онлайн-модель оценивается на вопросах головы: `--records-from` берёт ровно вопросы её файла предсказаний, в том
+же порядке. Онлайн-модель этих видео не видела.
+
+- Перед оценкой проверяется, что у каждого вопроса та же целевая пара и то же число пар, что у головы.
+- Видео, которых нет в кэше энкодера, кодируются заранее: около 14 МБ на видео.
+
+```bash
+# 1. validation-половина головы: на ней выбирается τ_val онлайн-модели (тот же набор и та же процедура, что у головы)
+python scripts/evaluate_online_sft.py --run outputs/online_sft --name head_validation \
+    --records-from results/lora/<arch>/<id>/predictions_validation.json
+# 2. test-половина головы при τ_val из шага 1
+python scripts/evaluate_online_sft.py --run outputs/online_sft --name head_test \
+    --records-from results/lora/<arch>/<id>/predictions_test_best_tau<τ>.json \
+    --tau-from outputs/online_sft/predictions_head_validation_best.json
+```
+
+Без `--tau-from` τ_val берётся с LoRA-validation прогона.
+
+**Критерий порога** (`--tau-criterion`):
+
+- по умолчанию `on_time_0_4` — наибольшая доля вопросов, ответ на которые пришёл с задержкой 0–4 пары после целевой
+  пары, но не раньше её;
+- `on_target_pm2` — окно ±2 пары.
+
+При каждом τ считаются обе доли и ещё три метрики:
+
+- `on_time_0_9` — задержка 0–9 пар;
+- `timely_correct_0_4`, `timely_correct_0_9` — то же окно плюс верный ответ. Лучший τ по каждому окну
+записывается в `best_thresholds`; перебор точный.
+
+Порог головы выбирается той же процедурой: `online_vllm.eval.thresholds` по её `predictions_validation.json`, строка
+`best on_time_0_4`. Её test при этом пороге даёт тот же инструмент: вероятности головы от τ не зависят.
+
 ## Кривая «задержка — точность»
 
 `latency_accuracy` в `validation_metrics.jsonl` и `test_best.json` (`eval/metrics.py`; считается и для голов, если в

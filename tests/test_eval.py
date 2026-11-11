@@ -69,22 +69,38 @@ def test_latency_accuracy_equals_a_sweep_over_every_threshold():
     assert latency_accuracy(p, targets, mask, correct)["auc"] == pytest.approx(expected)
 
 
-def test_best_window_threshold_is_the_maximum_over_every_threshold():
-    from online_vllm.eval.metrics import best_window_threshold
+@pytest.mark.parametrize("metric", ["on_target_pm2", "on_time_0_4"])
+def test_best_window_threshold_is_the_maximum_over_every_threshold(metric):
+    from online_vllm.eval.metrics import THRESHOLD_WINDOWS, best_window_threshold
     rng = np.random.default_rng(1)
     p = rng.random((40, 16)).round(2)
     p[0, 0], p[1, :] = 0.0, 1.0  # exact 0 and 1 as float32 softmax gives
     lengths = rng.integers(6, 17, 40)
     mask = np.arange(16) < lengths[:, None]
     targets = [int(rng.integers(0, n)) for n in lengths]
-    best = best_window_threshold(p, targets, mask, 2)
-    assert 0 < best["tau_low"] <= best["tau"] < best["tau_high"] <= 1
+    best = best_window_threshold(p, targets, mask, THRESHOLD_WINDOWS[metric])
+    assert best["metric"] == metric and 0 < best["tau_low"] <= best["tau"] < best["tau_high"] <= 1
     grid = sorted({*np.unique(p[mask]), *(np.unique(p[mask]) + 0.005)} - {0.0} - {1.0})
     swept = evaluate_readiness(p, targets, targets, [t for t in grid if 0 < t < 1], 1, 1, valid_mask=mask)["thresholds"]
-    assert best["on_target_pm2"] == pytest.approx(max(v["on_target_pm2"] for v in swept.values()))
+    assert best[metric] == pytest.approx(max(v[metric] for v in swept.values()))
     at_best = evaluate_readiness(p, targets, targets, [best["tau"]], 1, 1, valid_mask=mask)["thresholds"]
-    assert at_best[str(best["tau"])]["on_target_pm2"] == pytest.approx(best["on_target_pm2"])
-    assert evaluate_readiness(p, targets, targets, [.5], 1, 1, valid_mask=mask)["best_threshold_pm2"] == best
+    assert at_best[str(best["tau"])][metric] == pytest.approx(best[metric])
+    assert evaluate_readiness(p, targets, targets, [.5], 1, 1, valid_mask=mask)["best_thresholds"][metric] == best
+    if metric == "on_target_pm2":
+        assert best_window_threshold(p, targets, mask, 2) == best
+
+
+def test_on_time_0_4_counts_answers_from_the_target_pair_to_4_pairs_after_it():
+    # Target pair 5; first firing at pairs 3 (premature), 5, 9 (4 late), 10 (5 late) and never.
+    p = np.full((5, 12), 0.1)
+    for row, fired in enumerate((3, 5, 9, 10)):
+        p[row, fired:] = 0.9
+    correct = np.ones((5, 12), dtype=bool)
+    correct[2] = False  # the answer at pair 9 is wrong
+    metrics = evaluate_readiness(p, [5] * 5, [5] * 5, [0.5], 2, 1, correct=correct)["thresholds"]["0.5"]
+    assert metrics["on_time_0_4"] == pytest.approx(2 / 5) and metrics["on_target_pm2"] == pytest.approx(2 / 5)
+    assert metrics["timely_correct_0_4"] == pytest.approx(1 / 5)
+    assert metrics["on_time_0_9"] == pytest.approx(3 / 5) and metrics["timely_correct_0_9"] == pytest.approx(2 / 5)
 
 
 def test_early_late_and_miss_timing_is_conditional():

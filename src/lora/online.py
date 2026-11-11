@@ -570,6 +570,39 @@ def _as_is(item):
     return item
 
 
+def records_of_predictions(predictions: Mapping[str, Any], records: Iterable[Record]) -> list[Record]:
+    """The questions of another model's predictions file (eval/export.py format), in its order, taken from the dataset
+    records: to evaluate the online model on exactly the questions of a readiness head (its test or validation)."""
+    by_id = {record.id: record for record in records}
+    ids = [row["record_id"] for row in predictions["predictions"]]
+    if len(set(ids)) != len(ids):
+        raise ValueError("The predictions repeat a question")
+    missing = [record_id for record_id in ids if record_id not in by_id]
+    if missing:
+        raise ValueError(f"{len(missing)} of {len(ids)} questions of the predictions are not in the records, "
+                         f"e.g. {missing[:3]}")
+    return [by_id[record_id] for record_id in ids]
+
+
+def check_same_questions(predictions: Mapping[str, Any], records: Sequence[Record], *, builder: InputBuilder,
+                         split: ClevrerLoRASplitConfig) -> None:
+    """Before evaluating: every question has the target pair and the number of pairs that the other model's
+    predictions have, so that the two are compared pair by pair (else the frame stride, speak delay or video length
+    differ)."""
+    rows = {row["record_id"]: row for row in predictions["predictions"]}
+    differ = []
+    for record in records:
+        row = rows[record.id]
+        patches = -(-record.num_frames // split.frame_stride) // builder.temporal_patch
+        target = _target_patch(record, builder=builder, frame_stride=split.frame_stride,
+                               speak_delay=split.speak_delay, patches=patches)
+        if target != row["target_pair"] or patches != len(row["probabilities"]):
+            differ.append(f"{record.id}: target pair {target} vs {row['target_pair']}, "
+                          f"{patches} pairs vs {len(row['probabilities'])}")
+    if differ:
+        raise ValueError(f"{len(differ)} of {len(records)} questions differ from the predictions, e.g. {differ[0]}")
+
+
 @torch.inference_mode()
 def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, split: ClevrerLoRASplitConfig,
                     tokens: ControlTokens, spec: RopeSpec, objective: OnlineObjective, device,
@@ -620,7 +653,7 @@ def evaluate_online(model, records: Sequence[Record], *, builder: InputBuilder, 
     summary = {"count": len(rows), "loss": slot_loss + objective.answer_weight * answer_loss, "slot_loss": slot_loss,
                "answer_loss": answer_loss, "control_mass": float(np.mean(mass)),
                **{f"{name}_accuracy": float(np.mean(values)) for name, values in at.items()},
-               "latency_accuracy": readiness["latency_accuracy"], "best_threshold_pm2": readiness["best_threshold_pm2"],
+               "latency_accuracy": readiness["latency_accuracy"], "best_thresholds": readiness["best_thresholds"],
                "classification": readiness["classification"], "online": readiness["results"]}
     return summary, payload
 
@@ -641,8 +674,9 @@ def _latency_line(values: Mapping[str, Any]) -> str:
 
 
 def _best_threshold_line(values: Mapping[str, Any]) -> str:
-    return (f"best tau for on_target_pm2: {values['tau']:.6g} (any in [{values['tau_low']:.6g}, "
-            f"{values['tau_high']:.6g})) -> {100 * values['on_target_pm2']:.1f}%")
+    metric = values["metric"]
+    return (f"best tau for {metric}: {values['tau']:.6g} (any in [{values['tau_low']:.6g}, "
+            f"{values['tau_high']:.6g})) -> {100 * values[metric]:.1f}%")
 
 
 def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | None) -> None:
@@ -653,11 +687,14 @@ def _print_summary(epoch: int, summary: Mapping[str, Any], train_loss: float | N
                                              for name in ("start", "target", "answerable", "end")))
     print("  " + _latency_line(summary["latency_accuracy"]))
     print("  " + _classification_line(summary["classification"]))
-    print("  " + _best_threshold_line(summary["best_threshold_pm2"]))
+    for best in summary["best_thresholds"].values():
+        print("  " + _best_threshold_line(best))
     for tau, values in summary["online"].items():
         print(f"  tau={tau}: on_target_pm2={100 * values['on_target_pm2']:.1f}% "
+              f"on_time_0_4={100 * values['on_time_0_4']:.1f}% "
               f"premature={100 * values['premature_rate']:.1f}% missed={100 * values['missed_rate']:.1f}% "
-              f"answer={100 * values['answer_accuracy']:.1f}% timely_correct_pm2={100 * values['timely_correct_pm2']:.1f}%")
+              f"answer={100 * values['answer_accuracy']:.1f}% timely_correct_pm2={100 * values['timely_correct_pm2']:.1f}% "
+              f"timely_correct_0_4={100 * values['timely_correct_0_4']:.1f}%")
 
 
 # ----------------------------------------------------------------------------------------------------------- training

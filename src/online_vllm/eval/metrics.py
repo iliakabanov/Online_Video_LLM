@@ -165,19 +165,36 @@ def latency_accuracy(probabilities, target_pairs, valid_mask, correct) -> dict:
             "accuracy_at": {str(b): at(b) for b in LATENCY_BUDGETS}, "points": int(len(x))}
 
 
-def best_window_threshold(probabilities, target_pairs, valid_mask, window: int = 2) -> dict:
-    """Порог τ с наибольшей долей вопросов, ответ на которые пришёл в окне |k − t*| <= window (on_target_pm<window>
-    из _threshold_metrics: срабатывание на первой паре с p_k > τ, пропуск — мимо окна).
+# Окна срабатывания, по которым выбирается порог: метрика _threshold_metrics -> допустимый сдвиг k − t* в парах
+# (включительно). on_target_pm2 — симметричное окно ±2; on_time_0_4 — не раньше целевой пары и не позже 4 пар после неё.
+THRESHOLD_WINDOWS = {"on_target_pm2": (-2, 2), "on_time_0_4": (0, 4)}
+# При каждом τ: доля ответов с задержкой 0..d пар после целевой пары (on_time_0_d) и из них верных (timely_correct_0_d).
+ON_TIME_DELAYS = (4, 9)
+
+
+def window_metric(window: tuple[int, int]) -> str:
+    low, high = window
+    return f"on_target_pm{high}" if low == -high else f"on_time_{low}_{high}"
+
+
+def best_window_threshold(probabilities, target_pairs, valid_mask, window: int | tuple[int, int] = 2) -> dict:
+    """Порог τ с наибольшей долей вопросов, ответ на которые пришёл в окне low <= k − t* <= high (window = (low, high);
+    число w — окно (−w, w)). Это метрика window_metric(window) из _threshold_metrics: срабатывание на первой паре с
+    p_k > τ, пропуск — мимо окна.
 
     Перебор точный: доля меняется только на порогах, где у какого-то вопроса сдвигается пара срабатывания (значения
     running max его p_k), поэтому она постоянна на интервалах [tau_low, tau_high). Из интервалов с максимумом берётся
     самый широкий, tau — его середина (внутри интервала любое τ даёт ту же долю)."""
+    low_shift, high_shift = (-window, window) if isinstance(window, int) else tuple(window)
+    if low_shift > high_shift:
+        raise ValueError("Окно должно быть low <= high")
     hits0, taus, deltas = 0, [], []
     for p, target, mask in zip(probabilities, target_pairs, valid_mask):
         n = int(mask.sum())
         run = np.maximum.accumulate(np.asarray(p[:n], dtype=float))
         records = np.r_[0, np.flatnonzero(run[1:] > run[:-1]) + 1]  # пары срабатывания при росте τ
-        inside = (np.abs(records - target) <= window).astype(int)
+        shift = records - target
+        inside = ((shift >= low_shift) & (shift <= high_shift)).astype(int)
         hits0 += inside[0]
         taus.append(run[records]); deltas.append(np.r_[inside[1:], 0] - inside)  # после последней — пропуск
     tau, delta = np.concatenate(taus), np.concatenate(deltas)
@@ -190,15 +207,16 @@ def best_window_threshold(probabilities, target_pairs, valid_mask, window: int =
     # Пустой интервал (p_k ровно 0 или 1 в float32) порогом из (0, 1) не достигается.
     best = int(np.lexsort((-widths, -np.where(widths > 0, values, -1)))[0])
     low, high = float(edges[best]), float(edges[best + 1])
-    return {"window": window, "tau": (low + high) / 2, "tau_low": low, "tau_high": high,
-            f"on_target_pm{window}": float(values[best] / len(target_pairs))}
+    metric = window_metric((low_shift, high_shift))
+    return {"metric": metric, "window": [low_shift, high_shift], "tau": (low + high) / 2, "tau_low": low,
+            "tau_high": high, metric: float(values[best] / len(target_pairs))}
 
 
 def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, tau, frames_per_pair, fps,
                        correct=None):
     kinds = {"premature": 0, "early": 0, "on_target": 0, "late": 0, "missed": 0}
     right = dict.fromkeys(kinds, 0)  # верные ответы Qwen на паре срабатывания, по исходам
-    timely_right = 0
+    timely_right, on_time_right = 0, dict.fromkeys(ON_TIME_DELAYS, 0)
     errors, seconds = [], []
     for v, (p, target, visible, mask, one_fps) in enumerate(zip(probabilities, target_pairs, visible_pairs,
                                                                  valid_mask, fps)):
@@ -219,6 +237,8 @@ def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, t
         if correct is not None and correct[v][fired]:
             right[kind] += 1
             timely_right += abs(error) <= 2
+            for delay in ON_TIME_DELAYS:
+                on_time_right[delay] += 0 <= error <= delay
     videos = len(target_pairs)
     result = {f"{name}_rate": value / videos for name, value in kinds.items()}
     result["miss_rate"] = result["missed_rate"]  # старый JSON sweep до унификации
@@ -227,6 +247,8 @@ def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, t
     result.update({"on_target_pm1": sum(abs(x / frames_per_pair) <= 1 for x in fired_errors) / videos,
                    "on_target_pm2": sum(abs(x / frames_per_pair) <= 2 for x in fired_errors) / videos,
                    "on_target_pm5": sum(abs(x / frames_per_pair) <= 5 for x in fired_errors) / videos,
+                   **{f"on_time_0_{delay}": sum(0 <= x / frames_per_pair <= delay for x in fired_errors) / videos
+                      for delay in ON_TIME_DELAYS},
                    "timing_count": int(len(fired_errors))})
     for name, fn in (("mean", np.mean), ("std", np.std), ("mae", lambda x: np.mean(abs(x))),
                      ("rmse", lambda x: math.sqrt(np.mean(x * x))), ("median", np.median)):
@@ -241,6 +263,8 @@ def _threshold_metrics(probabilities, target_pairs, visible_pairs, valid_mask, t
         result["answer_accuracy"] = sum(right.values()) / videos
         result["answer_accuracy_answered"] = sum(right.values()) / answered if answered else None
         result["timely_correct_pm2"] = timely_right / videos
+        for delay in ON_TIME_DELAYS:
+            result[f"timely_correct_0_{delay}"] = on_time_right[delay] / videos
         for kind in ("premature", "early", "on_target", "late"):
             result[f"answer_accuracy_{kind}"] = right[kind] / kinds[kind] if kinds[kind] else None
     return result
@@ -276,7 +300,8 @@ def evaluate_readiness(probabilities: np.ndarray | torch.Tensor, target_pairs: S
     output = {"model": model, "tags": tags, "num_videos": len(p),
               "classification": _classification(p, target_pairs, mask, classification_threshold), "thresholds": {},
               "latency_accuracy": None if correct is None else latency_accuracy(p, target_pairs, mask, correct),
-              "best_threshold_pm2": best_window_threshold(p, target_pairs, mask, 2)}
+              "best_thresholds": {metric: best_window_threshold(p, target_pairs, mask, window)
+                                  for metric, window in THRESHOLD_WINDOWS.items()}}
     frames_per_pair = temporal_patch * frame_stride
     for tau in taus:
         if not 0 < tau < 1:
