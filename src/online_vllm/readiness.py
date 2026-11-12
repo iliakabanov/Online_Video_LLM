@@ -9,9 +9,17 @@ import torch
 from torch import nn
 
 
-# confidence = raw probe vector plus один индикатор доступности на каждую букву выбора.
-FEATURE_DIMS = {"lm": 24576, "attention": 12672, "entropy": 1728, "vision": 5120, "confidence": 19}
-FEATURE_OUTPUT_DIMS = {"lm": 256, "attention": 256, "entropy": 64, "vision": 128, "confidence": 32}
+# Размеры групп в признаках офлайн-модели (по умолчанию); у признаков онлайн-модели attention больше (группа <listen>),
+# и есть listen_token_logit. Фактические размеры берутся из meta.json признаков (uhead.data.feature_dims) и хранятся в
+# config.input_dims. confidence = raw probe vector plus один индикатор доступности на каждую букву выбора.
+FEATURE_DIMS = {"lm": 24576, "attention": 12672, "entropy": 1728, "vision": 5120, "confidence": 19,
+                "listen_token_logit": 3}
+FEATURE_OUTPUT_DIMS = {"lm": 256, "attention": 256, "entropy": 64, "vision": 128, "confidence": 32,
+                       "listen_token_logit": 16}
+
+
+def input_dim(config, name: str) -> int:
+    return config.input_dims.get(name, FEATURE_DIMS[name])
 
 
 class Projection(nn.Sequential):
@@ -27,20 +35,20 @@ class ReadinessFusion(nn.Module):
         super().__init__()
         self.config = config
         self.projections = nn.ModuleDict({
-            name: Projection(FEATURE_DIMS[name], config.projection_hidden_dims.get(name, config.projection_dims[name] * 2),
+            name: Projection(input_dim(config, name), config.projection_hidden_dims.get(name, config.projection_dims[name] * 2),
                              config.projection_dims[name], config.dropout)
             for name in config.groups
         })
         self.fusion = nn.Sequential(nn.Linear(config.fusion_dim, config.model_dim), nn.LayerNorm(config.model_dim))
         for name in config.groups:
-            self.register_buffer(f"{name}_mean", torch.zeros(FEATURE_DIMS[name]), persistent=True)
-            self.register_buffer(f"{name}_std", torch.ones(FEATURE_DIMS[name]), persistent=True)
+            self.register_buffer(f"{name}_mean", torch.zeros(input_dim(config, name)), persistent=True)
+            self.register_buffer(f"{name}_std", torch.ones(input_dim(config, name)), persistent=True)
 
     def set_normalization(self, stats: dict[str, tuple[torch.Tensor, torch.Tensor]]):
         if set(stats) != set(self.config.groups):
             raise ValueError("Статистики нормализации не соответствуют группам признаков")
         for name, (mean, std) in stats.items():
-            if mean.shape != (FEATURE_DIMS[name],) or std.shape != mean.shape:
+            if mean.shape != (input_dim(self.config, name),) or std.shape != mean.shape:
                 raise ValueError(f"Некорректная форма статистики для {name}")
             getattr(self, f"{name}_mean").copy_(mean.float())
             # Колонка, постоянная на train, только центрируется: деление на eps превратило бы малое отличие
@@ -59,8 +67,8 @@ class ReadinessFusion(nn.Module):
         projected = []
         for name in self.config.groups:
             value = features[name]
-            if value.shape != (batch, steps, FEATURE_DIMS[name]):
-                raise ValueError(f"{name}: ожидалась форма {(batch, steps, FEATURE_DIMS[name])}")
+            if value.shape != (batch, steps, input_dim(self.config, name)):
+                raise ValueError(f"{name}: ожидалась форма {(batch, steps, input_dim(self.config, name))}")
             normalized = (value.float() - getattr(self, f"{name}_mean")) / getattr(self, f"{name}_std").clamp_min(
                 self.config.normalization_eps)
             projected.append(self.projections[name](normalized))

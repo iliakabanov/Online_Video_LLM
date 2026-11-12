@@ -9,9 +9,12 @@ from online_vllm.readiness import FEATURE_DIMS, FEATURE_OUTPUT_DIMS
 @dataclass
 class UHeadConfig:
     """Настройки проекций, fusion и causal Transformer; порядок groups определяет конкатенацию."""
-    groups: list[str] = field(default_factory=lambda: list(FEATURE_DIMS))
+    groups: list[str] = field(default_factory=lambda: [g for g in FEATURE_DIMS if g != "listen_token_logit"])
     projection_dims: dict[str, int] = field(default_factory=lambda: dict(FEATURE_OUTPUT_DIMS))
     projection_hidden_dims: dict[str, int] = field(default_factory=dict)
+    # Размеры входов групп в признаках, на которых учится голова (uhead.data.feature_dims из meta.json); пусто —
+    # FEATURE_DIMS, признаки офлайн-модели. Сохраняются с конфигом: голова читает ровно те признаки, на которых училась.
+    input_dims: dict[str, int] = field(default_factory=dict)
     model_dim: int = 512
     nhead: int = 8
     num_layers: int = 2
@@ -23,11 +26,17 @@ class UHeadConfig:
     compact_num_layers: int = 1
     compact_ffn_dim: int = 508
 
+    def __post_init__(self):
+        # Конфиги, написанные до появления группы (listen_token_logit), получают её проекцию по умолчанию.
+        self.projection_dims = {**FEATURE_OUTPUT_DIMS, **dict(self.projection_dims)}
+
     def validate(self):
         if not self.groups or len(set(self.groups)) != len(self.groups) or set(self.groups) - set(FEATURE_DIMS):
             raise ValueError(f"groups must be a nonempty unique subset of {sorted(FEATURE_DIMS)}")
         if set(self.projection_dims) != set(FEATURE_DIMS):
             raise ValueError("projection_dims must name every known feature group")
+        if set(self.input_dims) - set(FEATURE_DIMS) or any(v <= 0 for v in self.input_dims.values()):
+            raise ValueError("input_dims must map known feature groups to positive sizes")
         if set(self.projection_hidden_dims) - set(FEATURE_DIMS):
             raise ValueError("projection_hidden_dims contains an unknown feature group")
         if any(v <= 0 for v in self.projection_dims.values()) or any(v <= 0 for v in self.projection_hidden_dims.values()):

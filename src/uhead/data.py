@@ -69,23 +69,44 @@ def confidence_features(raw: np.ndarray, max_choices: int) -> np.ndarray:
     return np.concatenate([values, availability, tail.astype(np.float32, copy=False)], axis=1)
 
 
+GROUP_ARRAYS = {"lm": ("lm_last", "lm_mean", "probe_hidden"), "attention": ("att_last", "att_mean", "att_probe"),
+                "entropy": ("att_entropy",), "vision": ("vis_mean",), "confidence": ("probe_logprob",),
+                "listen_token_logit": ("listen_token_logit",)}
+
+
+def feature_dims(meta: dict) -> dict[str, int]:
+    """Размеры групп в этих признаках (meta.json): у признаков онлайн-модели attention шире (группа <listen>) и есть
+    listen_token_logit; группы, массивов которых нет, не входят."""
+    shapes = meta["shapes"]
+    dims = {name: sum(int(np.prod(shapes[a])) for a in arrays) for name, arrays in GROUP_ARRAYS.items()
+            if all(a in shapes for a in arrays)}
+    if "confidence" in dims:  # буквы дополнены до CONFIDENCE_SLOTS и индикатор доступности каждой (confidence_features)
+        dims["confidence"] += 2 * CONFIDENCE_SLOTS - meta["max_choices"]
+    return dims
+
+
 def feature_rows(fs: FeatureSet, index: int, n: int, groups: list[str]) -> dict[str, np.ndarray]:
     """Возвращает исходные признаки первых n пар без изменения порядка координат."""
     if not groups or len(groups) != len(set(groups)) or set(groups) - set(FEATURE_DIMS):
         raise ValueError("groups должны быть непустым списком уникальных известных групп")
+    dims = feature_dims(fs.meta)
+    missing = set(groups) - set(dims)
+    if missing:
+        raise ValueError(f"В этих признаках нет групп {sorted(missing)} (есть {sorted(dims)})")
     loaders = {
         "lm": lambda: [fs.question(name, index)[:n] for name in ("lm_last", "lm_mean", "probe_hidden")],
         "attention": lambda: [fs.question(name, index)[:n] for name in ("att_last", "att_mean", "att_probe")],
         "entropy": lambda: [fs.question("att_entropy", index)[:n]],
         "vision": lambda: [fs.video(index)[:n]],
         "confidence": lambda: [confidence_features(fs.question("probe_logprob", index)[:n], fs.meta["max_choices"])],
+        "listen_token_logit": lambda: [fs.question("listen_token_logit", index)[:n]],
     }
     arrays = {name: loaders[name]() for name in groups}
     result = {name: np.concatenate([x.reshape(n, -1) for x in arrays[name]], axis=1).astype(np.float32)
               for name in groups}
     for name, array in result.items():
-        if array.shape != (n, FEATURE_DIMS[name]):
-            raise ValueError(f"{name}: expected {(n, FEATURE_DIMS[name])}, got {array.shape}; incompatible extraction")
+        if array.shape != (n, dims[name]):
+            raise ValueError(f"{name}: expected {(n, dims[name])}, got {array.shape}; incompatible extraction")
     return result
 
 
@@ -122,9 +143,10 @@ def collate(batch):
 
 def fit_normalization(dataset: ReadinessDataset) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """Потоковые train-only mean/std в float32 без материализации всего набора в памяти."""
+    dims = feature_dims(dataset.fs.meta)
     count = {name: 0 for name in dataset.groups}
-    total = {name: np.zeros(FEATURE_DIMS[name], dtype=np.float64) for name in dataset.groups}
-    square = {name: np.zeros(FEATURE_DIMS[name], dtype=np.float64) for name in dataset.groups}
+    total = {name: np.zeros(dims[name], dtype=np.float64) for name in dataset.groups}
+    square = {name: np.zeros(dims[name], dtype=np.float64) for name in dataset.groups}
     for item in dataset.items:
         values = feature_rows(dataset.fs, item.index, len(item.target), dataset.groups)
         for name, x in values.items():

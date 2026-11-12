@@ -338,6 +338,141 @@ def test_features_of_a_lora_model(setup, tiny_base, tmp_path):
                 "cpu", num_workers=0, adapter={**adapter, "sha256": "b"})
 
 
+def online_groups(row, labels, pair, prev, with_tail):
+    """Expected groups of the online model's row: special, question, <listen>, tail as shares of the row; pair p,
+    p-1 .. p-prev, earlier as shares of the attention on visual tokens."""
+    shares = {"special": 0.0, "question": 0.0, "listen": 0.0, "tail": 0.0}
+    visual = np.zeros(PAIRS)
+    for w, label in zip(row.tolist(), labels):
+        if isinstance(label, tuple):
+            visual[label[1]] += w
+        else:
+            shares[label] += w
+    visual /= visual.sum()
+    g = [shares["special"], shares["question"], shares["listen"]]
+    g += [visual[pair - d] if pair - d >= 0 else 0.0 for d in range(prev + 1)]
+    g.append(visual[:max(pair - prev, 0)].sum())
+    return g + [shares["tail"]] if with_tail else g
+
+
+def visual_entropy(row, visual_keys):
+    q = row[visual_keys]
+    q = (q / q.sum()).clamp_min(1e-30)
+    return float(-(q * q.log()).sum() / np.log(len(visual_keys)))
+
+
+def test_online_features_match_the_online_model(setup, builder, tiny_base, tmp_path):
+    """Features of the online model (lora/online.py) against its own evaluation pass (build_example: <listen> after
+    every pair, a <speak> branch per pair, one forward with eager attention): hidden states at the decision position
+    (the last visual token of the pair) and of the branch, the answer of the branch, the attention groups with <listen>
+    and the pair groups over visual tokens, the visual entropy, and listen_token_logit."""
+    from lora.online import RopeSpec, build_example, build_online_model, template
+    from test_online_sft import _config, _perturb
+    from test_train import remap
+    from uhead.data import feature_dims, feature_rows
+
+    class OnlineTiny(TinyBuilder):  # the template of lora/online.py encodes tokens without frames
+        def _encode_tokens(self, *args, **kwargs):
+            return remap(super()._encode_tokens(*args, **kwargs))
+
+    data, records, config, _, _ = setup
+    tiny = OnlineTiny(builder.processor)
+    model, tokens = build_online_model(_config(tiny_base), tiny.processor.tokenizer, init_adapter=None,
+                                       local_files_only=True)
+    _perturb(model)
+    model.eval()
+    config.features.batch_size = 3  # prompts of different lengths and two videos in one batch
+    out = extract(model, tiny, data / config.data.train, data, config.video, config.features, tmp_path / "online",
+                  "cpu", num_workers=0, flush_every=1, control=(tokens.listen, tokens.speak))
+    fs = FeatureSet(out)
+    prev, heads, layers = 1, 4, 2
+    shard = fs.shards[0]
+    assert shard["att_last"].shape == (3 * PAIRS, layers * heads, 4 + prev + 1) and shard["att_probe"].shape[-1] == 7
+    assert shard["listen_token_logit"].shape == (3 * PAIRS, 3) and fs.meta["online"]["listen_token"] == tokens.listen
+    tokenizer = tiny.processor.tokenizer
+    close = dict(rtol=1e-2, atol=1e-2)
+
+    for i in (0, 2):
+        r = records[i]
+        prompt = format_prompt(r.question, r.choices)
+        x = tiny.build_sequence(prompt, read_every(data / r.video, 1, SIZE)[:2 * PAIRS], 25, [0] * PAIRS)
+        grid, seconds = x["video_grid_thw"][0], x["second_per_grid_ts"]
+        tpl = template(tiny, prompt, grid, seconds)
+        start, per_pair = len(tpl.prefix), tpl.per_pair
+        assert x["input_ids"][0, :start].tolist() == tpl.prefix
+        entry = {"grid": grid, "second_per_grid_ts": seconds, "embeds": torch.zeros(PAIRS * per_pair, 1)}
+        ex = build_example(tpl, entry, spec=RopeSpec.of(model), tokens=tokens, slot_targets=torch.zeros(PAIRS),
+                           branch_pairs=range(PAIRS), answer=0)
+        ids = ex["input_ids"]
+        weights = {}
+        model.qwen.model.rope_deltas = None
+        with torch.no_grad(), eager_weights(weights):
+            ref = model.qwen.model(input_ids=ids[None], mm_token_type_ids=ex["mm_token_type_ids"][None],
+                                   pixel_values_videos=x["pixel_values_videos"], video_grid_thw=x["video_grid_thw"],
+                                   second_per_grid_ts=seconds, position_ids=ex["position_ids"][:, None],
+                                   attention_mask=ex["attention"][None, None], output_hidden_states=True,
+                                   use_cache=False, return_dict=True)
+            logits = model.qwen.lm_head(ref.last_hidden_state[0]).float()
+        hidden = [h[0] for h in ref.hidden_states]
+        main = len(ids) - PAIRS * (1 + len(tpl.tail))           # the branches come after the main sequence
+        offline_labels = segments(x, prompt, tokenizer, len(x["input_ids"][0]))[0]
+        labels, visual, count = [], [], 0
+        for j, token in enumerate(ids.tolist()):
+            if j < start:
+                labels.append(offline_labels[j])
+            elif j >= main:
+                labels.append("tail")
+            elif token == tpl.video_token:
+                labels.append(("pair", count // per_pair))
+                visual.append(j)
+                count += 1
+            else:
+                assert token == tokens.listen
+                labels.append("listen")
+        stored = {name: np.asarray(fs.question(name, i)) for name in fs.meta["shapes"] if name != "vis_mean"}
+        for p in range(PAIRS):
+            d, branch = int(ex["slot_index"][p]), int(ex["answer_index"][p])
+            pair_tokens = visual[p * per_pair:(p + 1) * per_pair]
+            seen = visual[:(p + 1) * per_pair]
+            assert d == pair_tokens[-1]
+            for li, k in enumerate((1, 2)):
+                torch.testing.assert_close(torch.from_numpy(stored["lm_last"][p, li].astype(np.float32)),
+                                           hidden[k][d], **close)
+                torch.testing.assert_close(torch.from_numpy(stored["lm_mean"][p, li].astype(np.float32)),
+                                           hidden[k][pair_tokens].mean(0), **close)
+                torch.testing.assert_close(torch.from_numpy(stored["probe_hidden"][p, li].astype(np.float32)),
+                                           hidden[k][branch], **close)
+            for layer in range(layers):
+                for h in range(heads):
+                    col, w = layer * heads + h, weights[layer][h]
+                    np.testing.assert_allclose(stored["att_last"][p, col], online_groups(w[d], labels, p, prev, False),
+                                               atol=2e-3)
+                    mean = np.mean([online_groups(w[t], labels, p, prev, False) for t in pair_tokens], 0)
+                    np.testing.assert_allclose(stored["att_mean"][p, col], mean, atol=2e-3)
+                    np.testing.assert_allclose(stored["att_probe"][p, col],
+                                               online_groups(w[branch], labels, p, prev, True), atol=2e-3)
+                    np.testing.assert_allclose(stored["att_entropy"][p, 0, col], visual_entropy(w[d], seen),
+                                               atol=2e-3)
+                    np.testing.assert_allclose(stored["att_entropy"][p, 2, col], visual_entropy(w[branch], seen),
+                                               atol=2e-3)
+            # The answer of the branch and the model's own readiness logits at the decision position.
+            log_probs = logits[branch].log_softmax(-1)
+            letters = [tokenizer(c, add_special_tokens=False).input_ids[0] for c in "ABC"[:len(r.choices)]]
+            np.testing.assert_allclose(stored["probe_logprob"][p][:len(r.choices)], log_probs[letters].numpy(),
+                                       atol=1e-3)
+            at = logits[d].log_softmax(-1)
+            np.testing.assert_allclose(stored["listen_token_logit"][p],
+                                       [float(logits[d, tokens.speak] - logits[d, tokens.listen]),
+                                        float(at[tokens.speak]), float(at[tokens.listen])], atol=1e-3)
+
+    # The heads read the online features: the wider attention group and listen_token_logit.
+    dims = feature_dims(fs.meta)
+    assert dims["attention"] == layers * heads * (6 + 6 + 7) and dims["listen_token_logit"] == 3
+    rows = feature_rows(fs, 0, PAIRS, ["attention", "listen_token_logit"])
+    assert rows["attention"].shape == (PAIRS, dims["attention"]) and rows["listen_token_logit"].shape == (PAIRS, 3)
+    np.testing.assert_allclose(shard["att_last"][:].astype(np.float32)[..., 3:].sum(-1), 1, atol=3e-3)  # visual
+
+
 def test_extract_the_first_videos(setup, tmp_path):
     data, records, config, model, builder = setup
     out = extract(model, builder, data / config.data.train, data, config.video, config.features, tmp_path / "v1",

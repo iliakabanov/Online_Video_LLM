@@ -234,7 +234,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
         raise ValueError("Некорректные параметры режима разметки")
     from online_vllm.train.features import FeatureSet
     from online_vllm.train.loop import lr_factor, seed_everything
-    from .data import ReadinessDataset, collate, fit_normalization, labelled
+    from .data import ReadinessDataset, collate, feature_dims, fit_normalization, labelled
     if train_config.loss.lm_weight:
         raise NotImplementedError("UHead обучается на кешированных признаках; loss.lm_weight должен быть 0")
     seed_everything(train_config.seed)
@@ -245,7 +245,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     eval_fs = FeatureSet(Path(data_root) / train_config.features.eval)
     for fs in (train_fs, eval_fs):
         fs.check(train_config.video)
-    for key in ("model_id", "revision", "quantization", "temporal_patch", "adapter"):
+    for key in ("model_id", "revision", "quantization", "temporal_patch", "adapter", "shapes", "online"):
         if train_fs.meta.get(key) != eval_fs.meta.get(key):  # adapter: только у признаков модели с LoRA
             raise ValueError(f"Train и eval features расходятся по {key}")
     train_items, train_dropped = labelled(train_fs, train_config, tags, step_window, sigmoid_slope, gaussian_sigma)
@@ -254,6 +254,13 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     logger.info("train: %d записей (%d исключено); eval: %d (%d исключено) -> validation %d вопросов / %d видео, "
                 "test %d / %d", len(train_items), train_dropped, len(eval_items), eval_dropped,
                 len(validation_items), len(split["validation_videos"]), len(test_items), len(split["test_videos"]))
+    # Размеры входов — из самих признаков (у онлайн-модели attention шире, есть listen_token_logit); сохраняются в
+    # конфиге головы, так что load_checkpoint строит её под те же признаки.
+    dims = feature_dims(train_fs.meta)
+    missing = set(uhead_config.groups) - set(dims)
+    if missing:
+        raise ValueError(f"В признаках {train_config.features.train} нет групп {sorted(missing)}")
+    uhead_config.input_dims = {g: dims[g] for g in uhead_config.groups}
     train_data = ReadinessDataset(train_fs, train_items, uhead_config.groups)
     validation_data = ReadinessDataset(eval_fs, validation_items, uhead_config.groups)
     model = (StateHead(uhead_config) if uhead_config.temporal_detector == "mlp" else UHead(uhead_config)).to(device)

@@ -13,6 +13,14 @@ python scripts/extract_features.py --split train --device cuda
 python scripts/extract_features.py --split eval --device cuda
 python scripts/extract_features.py --split train --videos 300                        # -> <features.train>_videos300
 python scripts/extract_features.py --split train --adapter outputs/lora_1000/best   # -> <features.train>_lora_1000_best
+
+With --online-run it is the online model of scripts/train_online_sft.py (--online-adapter: best, last, epoch_<n>) on its
+own input: a <listen> slot after every pair, the probe is its answer branch <speak> + tail; the attention groups add
+<listen> and the pair groups are shares of the attention on visual tokens; listen_token_logit holds its readiness
+logits (online_vllm/train/features.py). The directory gets the suffix _<run>_<adapter>.
+
+python scripts/extract_features.py --split eval --videos 1000 --no-upload \\
+    --online-run outputs/listen_sft_10ep --online-adapter epoch_10
 """
 import argparse
 import hashlib
@@ -53,6 +61,9 @@ def main():
     parser.add_argument("--model", default="configs/model/qwen_3b_head.yaml",
                         help="the base model (ignored with --adapter: the model.yaml of the adapter's run is used)")
     parser.add_argument("--adapter", help="LoRA adapter directory of train_lora_sft.py, e.g. outputs/lora_1000/best")
+    parser.add_argument("--online-run", help="run of scripts/train_online_sft.py: the online model on its own input "
+                                             "(<listen> slots, <speak> probes), with listen_token_logit")
+    parser.add_argument("--online-adapter", default="best", help="adapter of --online-run: best, last or epoch_<n>")
     parser.add_argument("--train", default="configs/train/group1.yaml")
     parser.add_argument("--split", choices=["train", "eval"], required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -71,7 +82,16 @@ def main():
     root = Path(args.data_root)
     out = root / getattr(config.features, args.split)
     adapter = None
-    if args.adapter:
+    if args.adapter and args.online_run:
+        parser.error("--adapter (offline LoRA) and --online-run exclude each other")
+    if args.online_run:
+        adapter_path = Path(args.online_run) / args.online_adapter
+        if not (adapter_path / "adapter_model.safetensors").exists() or not (adapter_path.parent / "online.json").exists():
+            raise FileNotFoundError(f"{adapter_path} is not an adapter of a train_online_sft.py run "
+                                    "(adapter_model.safetensors here, online.json in the run directory)")
+        adapter = adapter_description(adapter_path)
+        out = out.with_name(f"{out.name}_{adapter['run']}_{adapter['name']}")
+    elif args.adapter:
         adapter_path = Path(args.adapter)
         if not (adapter_path / "adapter_model.safetensors").exists() or not (adapter_path.parent / "model.yaml").exists():
             raise FileNotFoundError(f"{adapter_path} is not an adapter of a train_lora_sft.py run "
@@ -85,20 +105,30 @@ def main():
     uploader = None
     if config.features.upload and not args.no_upload:  # before loading the model: fail early without rclone
         uploader = DriveUploader(config.features.remote, config.features.remote_folder, out)
-    model_config = ModelConfig.load(Path(args.adapter).parent / "model.yaml" if adapter else args.model)
-    if args.device == "cpu":
-        model_config.backbone.dtype = "float32"
-    model = build_model(model_config, local_files_only=args.local_files_only, device=args.device)
-    if adapter:
-        load_lora_adapter(model, Path(args.adapter))
-        logging.info("LoRA adapter %s (run %s, epoch %s)", adapter["path"], adapter["run"], adapter["epoch"])
+    control = None
+    if args.online_run:
+        from lora.online import load_online_run
+        model, builder, tokens, _ = load_online_run(args.online_run, args.online_adapter,
+                                                    local_files_only=args.local_files_only, device=args.device)
+        control = (tokens.listen, tokens.speak)
+        logging.info("Online model %s (epoch %s), <listen> %d, <speak> %d", adapter["path"], adapter["epoch"],
+                     *control)
+    else:
+        model_config = ModelConfig.load(Path(args.adapter).parent / "model.yaml" if adapter else args.model)
+        if args.device == "cpu":
+            model_config.backbone.dtype = "float32"
+        model = build_model(model_config, local_files_only=args.local_files_only, device=args.device)
+        if adapter:
+            load_lora_adapter(model, Path(args.adapter))
+            logging.info("LoRA adapter %s (run %s, epoch %s)", adapter["path"], adapter["run"], adapter["epoch"])
+        builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     if torch.device(args.device).type == "cuda":
         # Past the physical memory Windows silently moves GPU allocations into RAM and everything slows down tenfold;
         # fail with an out-of-memory error instead.
         torch.cuda.set_per_process_memory_fraction(0.95)
-    builder = InputBuilder.from_config(model.config, local_files_only=args.local_files_only)
     out = extract(model, builder, root / getattr(config.data, args.split), root, config.video, config.features, out,
-                  args.device, args.num_workers, videos=args.videos, uploader=uploader, adapter=adapter)
+                  args.device, args.num_workers, videos=args.videos, uploader=uploader, adapter=adapter,
+                  control=control)
     print("Features:", out)
 
 
