@@ -48,7 +48,14 @@ PYTHONPATH=src python -m uhead.train --tags gaussian --gaussian-sigma 2.0 --outp
 ## Validation и test
 
 - Признаки `features.eval` делятся **по видео** (seed из конфига) на две равные части: validation и test. Вопросы одного видео всегда в одной части; списки видео — в `split.json`. `data.eval_samples` здесь не используется.
-- После каждой эпохи в `metrics.jsonl` пишутся только средний по батчам train loss и validation loss (`eval_loss`); сохраняется `last.pt`, а при наименьшем validation loss — `best.pt`. Метрики считаются один раз, в конце обучения, для `best.pt`.
+- **После каждой эпохи** в `metrics.jsonl` пишутся:
+  - средний по батчам train loss;
+  - validation loss (`eval_loss`);
+  - AUROC классификации префиксов в окне |k − t*| ≤ 2 (`eval_auroc_pm2`).
+- **Чекпоинты.** Каждую эпоху сохраняется `last.pt`. `best.pt` — эпоха с лучшим значением `--selection`:
+  - `loss` (по умолчанию) — наименьший validation loss;
+  - `auroc_pm2` — наибольший AUROC в окне ±2. Не зависит от порога и калибровки.
+- **Метрики** считаются один раз, в конце обучения, для `best.pt`.
 - После обучения `best.pt` оценивается на validation при каждом пороге `eval.thresholds`. Итог — `results.json` (лучшая эпоха, классификационные метрики, онлайн-метрики по каждому порогу) и вероятности `predictions_validation.json` (формат `online_vllm.eval.export`).
 - Test обучение не трогает. По `results.json` выберите порог и оцените test отдельно:
 

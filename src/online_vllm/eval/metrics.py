@@ -215,7 +215,7 @@ def best_window_threshold(probabilities, target_pairs, valid_mask, window: int |
 # Задержка пары «модель ответов — детектор» при ограничениях: доля преждевременных ответов (раньше t*) не больше
 # бюджета R и точность среди непреждевременных ответов не ниже уровня A (constrained_latency).
 PREMATURE_BUDGETS = (0.05, 0.10)
-ACCURACY_LEVELS = (0.85, 0.88)
+ACCURACY_LEVELS = (0.85, 0.90)
 
 
 def constraint_key(budget: float, level: float) -> str:

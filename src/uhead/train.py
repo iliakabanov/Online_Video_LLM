@@ -107,6 +107,15 @@ def predict(model, dataset, config, device, batch_size=64, with_rows=True) -> tu
 # Метрики evaluate_readiness по всем порогам сразу (без выбора τ): кривая «задержка — точность», лучший τ по окнам
 # срабатывания, задержка при ограничениях на преждевременные ответы и точность; None, если нет answer_correct.
 THRESHOLD_FREE_KEYS = ("latency_accuracy", "best_thresholds", "constrained_latency")
+# Выбор best.pt: наименьший validation loss или наибольший AUROC в окне |k − t*| <= 2.
+SELECTIONS = ("loss", "auroc_pm2")
+
+
+def window_auroc(rows) -> float:
+    """AUROC классификации префиксов «готов» (k >= t*) по p_k на парах |k − t*| <= 2, как classification.auroc_pm2."""
+    from online_vllm.eval.metrics import _classification
+    probabilities, masks = _pad_probabilities([row["probabilities"] for row in rows])
+    return _classification(probabilities, [row["target_pair"] for row in rows], masks, 0.5)["auroc_pm2"]
 
 
 def _readiness(rows, taus, meta, classification_threshold=0.5, model=None, tags=None) -> dict:
@@ -204,12 +213,20 @@ def load_checkpoint(path: str | Path, device="cpu", filename: str | None = None)
 
 def train(uhead_config, train_config, data_root: Path, output_dir: Path, device, tags: TagMode = "hard",
           step_window: int = 5, sigmoid_slope: float = 0.65, flat_output: bool = False,
-          overwrite: bool = False, results_dir: Path | None = None, gaussian_sigma: float = 2.0) -> Path:
+          overwrite: bool = False, results_dir: Path | None = None, gaussian_sigma: float = 2.0,
+          selection: str = "loss") -> Path:
     """Обучает один из трёх бинарных режимов GT; возвращает каталог запуска.
 
     В output_dir — то, что нужно для загрузки и оценки модели: best.pt, last.pt, конфиги, tags.json,
     experiment.json и split.json. В results_dir (по умолчанию тот же каталог) — результаты: metrics.jsonl,
-    results.json (метрики best.pt на validation при каждом пороге) и predictions_validation.json."""
+    results.json (метрики best.pt на validation при каждом пороге) и predictions_validation.json.
+
+    best.pt — эпоха с лучшим значением selection на validation (SELECTIONS): наименьший validation loss или
+    наибольший AUROC классификации префиксов в окне |k − t*| <= 2 (классификация по hard-метке «готов» с t*, не
+    зависит от порога и калибровки). При равенстве остаётся более ранняя эпоха. Оба значения пишутся в metrics.jsonl
+    после каждой эпохи."""
+    if selection not in SELECTIONS:
+        raise ValueError(f"selection должен быть одним из {SELECTIONS}")
     # Сохраняем работоспособность прежнего scripts/train_uhead.py, который передавал список классов третьим аргументом.
     if isinstance(data_root, list):
         _, data_root, output_dir, device, tags = data_root, output_dir, device, tags, "hard"
@@ -263,7 +280,7 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     total_steps = o.epochs * batches if o.max_steps is None else min(o.epochs * batches, o.max_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: lr_factor(step, o.warmup_steps, total_steps, o.schedule))
     log = open(results_dir / "metrics.jsonl", "w", encoding="utf-8")
-    step, best_loss, best_epoch = 0, math.inf, None
+    step, best_score, best_loss, best_epoch = 0, -math.inf, math.inf, None
 
     def record(metrics):
         log.write(json.dumps({"step": step, **tag_settings, **metrics}) + "\n")
@@ -287,14 +304,17 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
             optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True); step += 1
             if step >= total_steps:
                 break
-        # После эпохи — только validation loss (по нему выбирается best.pt); метрики считаются в конце обучения.
-        validation_loss = _preserve_rng(lambda: predict(model, validation_data, train_config, device, o.batch_size,
-                                                        with_rows=False)[0])
+        # После эпохи — validation loss и AUROC в окне ±2 (по selection выбирается best.pt); остальные метрики
+        # считаются в конце обучения для best.pt.
+        validation_loss, epoch_rows = _preserve_rng(
+            lambda: predict(model, validation_data, train_config, device, o.batch_size))
+        auroc_pm2 = window_auroc(epoch_rows)
         record({"epoch": epoch, "train_loss": sum(losses) / len(losses), "lr": scheduler.get_last_lr()[0],
-                "eval_loss": validation_loss})
+                "eval_loss": validation_loss, "eval_auroc_pm2": auroc_pm2})
         save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "last.pt")
-        if validation_loss < best_loss:
-            best_loss, best_epoch = validation_loss, epoch
+        score = -validation_loss if selection == "loss" else auroc_pm2
+        if score > best_score:
+            best_score, best_loss, best_epoch = score, validation_loss, epoch
             save_checkpoint(model, uhead_config, train_config, tag_settings, output_dir, metadata, "best.pt")
         if step >= total_steps:
             break
@@ -305,7 +325,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
     validation = _readiness(validation_rows, train_config.eval.thresholds, eval_fs.meta, model=model_name, tags=tags)
     results = {
         "model": model_name, "feature_groups": uhead_config.groups, **tag_settings,
-        "best_epoch": best_epoch, "best_validation_loss": best_loss,
+        "selection": selection, "best_epoch": best_epoch, "best_validation_loss": best_loss,
+        "best_validation_auroc_pm2": validation["classification"]["auroc_pm2"],
         "validation": {"questions": len(validation_rows), "videos": len(split["validation_videos"]),
                        "loss": validation_loss, "classification": validation["classification"],
                        "thresholds": validation["thresholds"],
@@ -315,7 +336,8 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
                                               encoding="utf-8")
     _write_predictions(results_dir / "predictions_validation.json", validation_rows, eval_fs.meta, model_name, tags,
                        "validation")
-    record({"final": True, "best_epoch": best_epoch, "best_validation_loss": best_loss,
+    record({"final": True, "selection": selection, "best_epoch": best_epoch, "best_validation_loss": best_loss,
+            "validation_auroc_pm2": validation["classification"]["auroc_pm2"],
             "validation_auroc": validation["classification"]["auroc"],
             "validation_auprc": validation["classification"]["auprc"]})
     log.close()
@@ -337,6 +359,8 @@ def build_parser():
     parser.add_argument("--data-root", default=os.environ.get("DATA_ROOT", "data"))
     parser.add_argument("--flat-output", action="store_true", help="Не добавлять каталог режима GT к --output")
     parser.add_argument("--overwrite", action="store_true", help="Разрешить запись в существующий каталог запуска")
+    parser.add_argument("--selection", choices=SELECTIONS, default="loss",
+                        help="best.pt: наименьший validation loss (loss) или наибольший AUROC в окне ±2 (auroc_pm2)")
     return parser
 
 
@@ -349,7 +373,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     result = train(UHeadConfig.load(args.uhead), TrainConfig.load(args.train), Path(args.data_root), Path(args.output),
                    args.device, args.tags, args.step_window, args.sigmoid_slope, args.flat_output, args.overwrite,
-                   Path(args.results) if args.results else None, gaussian_sigma=args.gaussian_sigma)
+                   Path(args.results) if args.results else None, gaussian_sigma=args.gaussian_sigma,
+                   selection=args.selection)
     print("Каталог запуска:", result)
 
 

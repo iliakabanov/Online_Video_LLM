@@ -203,6 +203,20 @@ def test_results_keep_the_metrics_over_every_threshold():
     assert without["latency_accuracy"] is None and without["constrained_latency"] is None
 
 
+def test_epoch_selection_auroc_is_the_validation_window_auroc():
+    """--selection auroc_pm2 выбирает best.pt по window_auroc: тот же AUROC в окне ±2, что в results.json."""
+    from uhead.train import SELECTIONS, _readiness, build_parser, window_auroc
+    rng = np.random.default_rng(1)
+    rows = []
+    for _ in range(30):
+        n, target = int(rng.integers(6, 12)), int(rng.integers(1, 5))
+        rows.append({"probabilities": rng.random(n), "target_pair": target, "visible_pair": target, "fps": 25.0})
+    expected = _readiness(rows, [0.5], {"temporal_patch": 2, "frame_stride": 1})["classification"]["auroc_pm2"]
+    assert window_auroc(rows) == expected
+    assert SELECTIONS == ("loss", "auroc_pm2")
+    assert build_parser().parse_args(["--tags", "hard", "--output", "x"]).selection == "loss"
+
+
 def test_feature_rows_does_not_read_unselected_groups():
     class FakeFeatures:
         def __init__(self):
