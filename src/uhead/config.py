@@ -3,13 +3,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import yaml
-from online_vllm.readiness import FEATURE_DIMS, FEATURE_OUTPUT_DIMS
+from online_vllm.readiness import DEFAULT_GROUPS, FEATURE_DIMS, FEATURE_OUTPUT_DIMS
 
 
 @dataclass
 class UHeadConfig:
     """Настройки проекций, fusion и causal Transformer; порядок groups определяет конкатенацию."""
-    groups: list[str] = field(default_factory=lambda: [g for g in FEATURE_DIMS if g != "listen_token_logit"])
+    groups: list[str] = field(default_factory=lambda: list(DEFAULT_GROUPS))
     projection_dims: dict[str, int] = field(default_factory=lambda: dict(FEATURE_OUTPUT_DIMS))
     projection_hidden_dims: dict[str, int] = field(default_factory=dict)
     # Размеры входов групп в признаках, на которых учится голова (uhead.data.feature_dims из meta.json); пусто —

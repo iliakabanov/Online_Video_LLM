@@ -82,6 +82,8 @@ def feature_dims(meta: dict) -> dict[str, int]:
             if all(a in shapes for a in arrays)}
     if "confidence" in dims:  # буквы дополнены до CONFIDENCE_SLOTS и индикатор доступности каждой (confidence_features)
         dims["confidence"] += 2 * CONFIDENCE_SLOTS - meta["max_choices"]
+    if "lm_last" in shapes and meta.get("layers") in meta.get("lm_layers", []):
+        dims["last_hidden"] = int(shapes["lm_last"][1])  # последний слой в позиции решения
     return dims
 
 
@@ -100,6 +102,8 @@ def feature_rows(fs: FeatureSet, index: int, n: int, groups: list[str]) -> dict[
         "vision": lambda: [fs.video(index)[:n]],
         "confidence": lambda: [confidence_features(fs.question("probe_logprob", index)[:n], fs.meta["max_choices"])],
         "listen_token_logit": lambda: [fs.question("listen_token_logit", index)[:n]],
+        # Последний слой (после финальной нормализации) на последнем визуальном токене пары.
+        "last_hidden": lambda: [fs.question("lm_last", index)[:n, fs.meta["lm_layers"].index(fs.meta["layers"])]],
     }
     arrays = {name: loaders[name]() for name in groups}
     result = {name: np.concatenate([x.reshape(n, -1) for x in arrays[name]], axis=1).astype(np.float32)

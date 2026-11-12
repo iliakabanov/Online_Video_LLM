@@ -471,6 +471,48 @@ def test_online_features_match_the_online_model(setup, builder, tiny_base, tmp_p
     rows = feature_rows(fs, 0, PAIRS, ["attention", "listen_token_logit"])
     assert rows["attention"].shape == (PAIRS, dims["attention"]) and rows["listen_token_logit"].shape == (PAIRS, 3)
     np.testing.assert_allclose(shard["att_last"][:].astype(np.float32)[..., 3:].sum(-1), 1, atol=3e-3)  # visual
+    # Baseline group: the last layer at the decision position only.
+    assert dims["last_hidden"] == 32
+    np.testing.assert_array_equal(feature_rows(fs, 0, PAIRS, ["last_hidden"])["last_hidden"],
+                                  np.asarray(fs.question("lm_last", 0))[:, -1].astype(np.float32))
+
+
+def test_confidence_baseline(setup, tmp_path):
+    """scripts/confidence_baseline.py: the three confidence scores of the answer as readiness, no training, on the
+    validation half of a head's split.json; results.json in the format of the heads."""
+    import dataclasses
+    import yaml
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from confidence_baseline import confidence_scores, main
+
+    scores = confidence_scores(np.array([[0.25, 0.25, 0.25, 0.25], [1.0, 0.0, 0.0, 0.0], [0.5, 0.3, 0.2, 0.0]]))
+    np.testing.assert_allclose(scores["maxprob"], [0, 1, (0.5 - 0.25) / 0.75], atol=1e-9)
+    np.testing.assert_allclose(scores["margin"], [0, 1, 0.2], atol=1e-9)
+    h = -(0.5 * np.log(0.5) + 0.3 * np.log(0.3) + 0.2 * np.log(0.2)) / np.log(4)
+    np.testing.assert_allclose(scores["entropy"], [0, 1, 1 - h], atol=1e-9)
+    two = confidence_scores(np.array([[0.75, 0.25]]))  # K = 2: maxprob from its own floor 1/2
+    np.testing.assert_allclose(two["maxprob"], [0.5]) and np.testing.assert_allclose(two["margin"], [0.5])
+
+    data, records, config, _, _ = setup
+    out = run_extract(setup)
+    (tmp_path / "train.yaml").write_text(yaml.safe_dump(dataclasses.asdict(config)), encoding="utf-8")
+    split = {"validation_videos": ["videos/v0.mp4"], "validation_questions": 2, "test_videos": ["videos/v1.mp4"],
+             "test_questions": 1}
+    (tmp_path / "split.json").write_text(json.dumps(split), encoding="utf-8")
+    argv = sys.argv
+    sys.argv = ["confidence_baseline.py", "--features", str(out), "--split", str(tmp_path / "split.json"),
+                "--train", str(tmp_path / "train.yaml"), "--output-root", str(tmp_path / "conf"), "--suffix", "t"]
+    try:
+        main()
+    finally:
+        sys.argv = argv
+    for name in ("maxprob", "margin", "entropy"):
+        result = json.loads((tmp_path / "conf" / f"{name}_conf_t" / "results.json").read_text(encoding="utf-8"))
+        assert result["validation"]["questions"] == 2 and result["best_epoch"] is None
+        assert {"classification", "best_thresholds", "constrained_latency"} <= set(result["validation"])
+        rows = json.loads((tmp_path / "conf" / f"{name}_conf_t" / "predictions_validation.json").read_text())
+        assert [row["record_id"] for row in rows["predictions"]] == ["r0", "r1"]
+        assert all(0 <= p <= 1 for row in rows["predictions"] for p in row["probabilities"])
 
 
 def test_extract_the_first_videos(setup, tmp_path):

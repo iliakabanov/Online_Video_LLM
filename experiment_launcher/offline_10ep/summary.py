@@ -13,9 +13,10 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ARCHITECTURES = {"mlp": "mlp", "transformer": "base", "compact": "compact"}  # каталог результатов -> метка в id
-# Группы признаков; в id запуска они соединены "_", а в listen_token_logit "_" есть и внутри имени.
-GROUPS = ("listen_token_logit", "lm", "attention", "entropy", "vision", "confidence")
+# каталог результатов -> метка в id; confidence — бейзлайн по уверенности ответа (scripts/confidence_baseline.py)
+ARCHITECTURES = {"mlp": "mlp", "transformer": "base", "compact": "compact", "confidence": "conf"}
+# Группы признаков; в id запуска они соединены "_", а в listen_token_logit и last_hidden "_" есть и внутри имени.
+GROUPS = ("listen_token_logit", "last_hidden", "lm", "attention", "entropy", "vision", "confidence")
 
 
 def group_names(prefix: str) -> str:
@@ -70,7 +71,8 @@ def main() -> None:
     for row in sorted(rows, key=lambda r: -r["auroc_pm2"]):
         on_time = "-" if row["on_time_0_4"] is None else f"{row['on_time_0_4']:.4f}"
         tau = "-" if row["on_time_0_4_tau"] is None else f"{row['on_time_0_4_tau']:.3f}"
-        print(f"{row['architecture']:12s} {row['group']:{width}s} {row['best_epoch']:>3} {row['auroc_pm2']:8.4f} "
+        epoch = "-" if row["best_epoch"] is None else row["best_epoch"]  # у бейзлайнов без обучения эпохи нет
+        print(f"{row['architecture']:12s} {row['group']:{width}s} {epoch:>3} {row['auroc_pm2']:8.4f} "
               f"{row['bce_pm2']:7.4f} {on_time:>8s} {tau:>6s} " +
               " ".join(f"{latency(row['constrained_latency'].get(key)):>12s}" for key in keys))
     output = Path(args.output) if args.output else ROOT / "results" / "lora" / f"summary_{args.suffix}.json"

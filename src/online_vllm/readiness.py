@@ -12,10 +12,12 @@ from torch import nn
 # Размеры групп в признаках офлайн-модели (по умолчанию); у признаков онлайн-модели attention больше (группа <listen>),
 # и есть listen_token_logit. Фактические размеры берутся из meta.json признаков (uhead.data.feature_dims) и хранятся в
 # config.input_dims. confidence = raw probe vector plus один индикатор доступности на каждую букву выбора.
+# last_hidden — бейзлайн: только скрытое состояние последнего слоя в позиции решения (часть группы lm).
 FEATURE_DIMS = {"lm": 24576, "attention": 12672, "entropy": 1728, "vision": 5120, "confidence": 19,
-                "listen_token_logit": 3}
+                "listen_token_logit": 3, "last_hidden": 2048}
 FEATURE_OUTPUT_DIMS = {"lm": 256, "attention": 256, "entropy": 64, "vision": 128, "confidence": 32,
-                       "listen_token_logit": 16}
+                       "listen_token_logit": 16, "last_hidden": 256}
+DEFAULT_GROUPS = ("lm", "attention", "entropy", "vision", "confidence")  # группы конфига по умолчанию
 
 
 def input_dim(config, name: str) -> int:
