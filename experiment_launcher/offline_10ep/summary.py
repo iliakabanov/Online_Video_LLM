@@ -14,6 +14,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ARCHITECTURES = {"mlp": "mlp", "transformer": "base", "compact": "compact"}  # каталог результатов -> метка в id
+# Группы признаков; в id запуска они соединены "_", а в listen_token_logit "_" есть и внутри имени.
+GROUPS = ("listen_token_logit", "lm", "attention", "entropy", "vision", "confidence")
+
+
+def group_names(prefix: str) -> str:
+    """"attention_listen_token_logit" -> "attention+listen_token_logit"."""
+    names = []
+    while prefix:
+        name = next((g for g in GROUPS if prefix == g or prefix.startswith(g + "_")), None)
+        if name is None:
+            return prefix  # не набор известных групп: как есть
+        names.append(name)
+        prefix = prefix[len(name) + 1:]
+    return "+".join(names)
 
 
 def latency(point) -> str:
@@ -32,7 +46,7 @@ def main() -> None:
     for architecture, tag in ARCHITECTURES.items():
         ending = f"_{tag}_{args.suffix}"
         for path in sorted((ROOT / "results" / "lora" / architecture).glob(f"*{ending}/results.json")):
-            group = "+".join(path.parent.name[:-len(ending)].split("_"))
+            group = group_names(path.parent.name[:-len(ending)])
             result = json.loads(path.read_text(encoding="utf-8"))
             validation = result["validation"]
             constrained = validation.get("constrained_latency") or {}
