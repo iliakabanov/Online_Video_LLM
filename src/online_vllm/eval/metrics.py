@@ -244,7 +244,7 @@ def operating_point(probabilities, target_pairs, valid_mask, correct, tau: float
 
 
 def constrained_latency(probabilities, target_pairs, valid_mask, correct, budgets: Sequence[float] = PREMATURE_BUDGETS,
-                        levels: Sequence[float] = ACCURACY_LEVELS) -> dict:
+                        levels: Sequence[float] = ACCURACY_LEVELS, points: bool = True) -> dict:
     """Для каждого бюджета R и уровня A: порог τ с наименьшей средней задержкой среди τ, где доля преждевременных
     ответов <= R и точность непреждевременных >= A (operating_point). Кривая по τ точная: доли меняются только на
     порогах, где у какого-то вопроса сдвигается пара ответа (значения running max p_k), поэтому всё постоянно на
@@ -288,6 +288,12 @@ def constrained_latency(probabilities, target_pairs, valid_mask, correct, budget
                 continue
             best = int(np.lexsort((-widths, np.where(feasible, latency, np.inf)))[0])
             low, high = float(edges[best]), float(edges[best + 1])
+            if not points:  # только выбор τ (перебор многих оценок): без медианы и доли принудительных ответов
+                result[key] = {"premature_budget": budget, "accuracy_level": level, "feasible": True,
+                               "tau_low": low, "tau_high": high, "tau": (low + high) / 2,
+                               "premature_rate": float(premature[best]), "accuracy": float(accuracy[best]),
+                               "latency_mean": float(latency[best])}
+                continue
             point = operating_point(probabilities, target_pairs, valid_mask, correct, (low + high) / 2)
             result[key] = {"premature_budget": budget, "accuracy_level": level, "feasible": True,
                            "tau_low": low, "tau_high": high, **point}

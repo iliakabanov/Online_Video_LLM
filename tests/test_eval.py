@@ -142,6 +142,39 @@ def test_test_report_takes_the_threshold_from_validation():
     assert len(questions(payload)) == 40
 
 
+def test_two_detectors_with_two_thresholds():
+    """report.two_detector_report: "and" fires where both detectors exceed their thresholds, "or" where either does;
+    the extreme τ1 gives the second detector alone, so on the validation the pair is at least as good as each."""
+    from online_vllm.eval.report import ALWAYS, NEVER, combined, two_detector_report
+    from online_vllm.eval.thresholds import sweep
+    rng = np.random.default_rng(7)
+    first, second = [], []
+    for i in range(60):
+        n, t = int(rng.integers(6, 14)), int(rng.integers(1, 5))
+        base = np.where(np.arange(n) >= t, 0.6, 0.15)
+        row = {"record_id": f"q{i}", "target_pair": t, "visible_pair": t, "fps": 25,
+               "answer_correct": (np.arange(n) >= t - 1).tolist()}
+        first.append({**row, "probabilities": np.clip(base + rng.random(n) * 0.5, 0, 1).round(3).tolist()})
+        second.append({**row, "probabilities": np.clip(base + rng.random(n) * 0.5, 0, 1).round(3).tolist()})
+    meta = {"temporal_patch": 2, "frame_stride": 1}
+    p, q = {"metadata": meta, "predictions": first}, {"metadata": meta, "predictions": second}
+    scores = [np.asarray(r["probabilities"]) for r in second]
+    for mode, extreme in (("and", ALWAYS), ("or", NEVER)):
+        alone = combined(p, scores, extreme, mode)
+        assert all(np.allclose(r["probabilities"], s) for r, s in zip(alone["predictions"], scores))
+    # "and" at the pair: the first k with p_k > τ1 and q_k > τ2.
+    rule = combined(p, scores, 0.5, "and")
+    for r, a, s in zip(rule["predictions"], first, scores):
+        hits = np.flatnonzero(np.asarray(r["probabilities"]) > 0.7)
+        both = np.flatnonzero((np.asarray(a["probabilities"]) > 0.5) & (s > 0.7))
+        assert (hits[:1] == both[:1]).all()
+    single = max(sweep(x, [0.5])["best_thresholds"]["on_time_0_4"]["on_time_0_4"] for x in (p, q))
+    for mode in ("and", "or"):
+        report = two_detector_report(p, p, q, q, mode, grid=30)
+        assert report["validation_on_time_0_4"] >= single - 1e-12
+        assert report["at_tau"]["on_time_0_4"] == pytest.approx(report["validation_on_time_0_4"])  # test = validation
+
+
 def test_on_time_0_4_counts_answers_from_the_target_pair_to_4_pairs_after_it():
     # Target pair 5; first firing at pairs 3 (premature), 5, 9 (4 late), 10 (5 late) and never.
     p = np.full((5, 12), 0.1)
