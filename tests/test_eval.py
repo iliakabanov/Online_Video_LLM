@@ -120,6 +120,28 @@ def test_constrained_latency_is_the_smallest_mean_latency_over_every_threshold()
     assert point["forced_rate"] == pytest.approx(1 / 3) and point["latency_mean"] == pytest.approx((1 + 2) / 2)
 
 
+def test_test_report_takes_the_threshold_from_validation():
+    """eval/report.py: τ of the validation applied to the test; with the test equal to the validation it is the best
+    τ of the test itself, and the constrained latency at the validation τ is the test curve's point."""
+    from online_vllm.eval.report import questions, test_report
+    from online_vllm.eval.thresholds import sweep
+    rng = np.random.default_rng(5)
+    rows = []
+    for i in range(40):
+        n, t = int(rng.integers(6, 14)), int(rng.integers(1, 5))
+        p = np.clip(np.where(np.arange(n) >= t, 0.6, 0.2) + rng.random(n) * 0.4, 0, 1)
+        rows.append({"record_id": f"q{i}", "probabilities": p.round(3).tolist(), "target_pair": t, "visible_pair": t,
+                     "fps": 25, "answer_correct": (np.arange(n) >= t - 1).tolist()})
+    payload = {"metadata": {"temporal_patch": 2, "frame_stride": 1}, "predictions": rows}
+    report = test_report(payload, payload)
+    best = sweep(payload, [0.5])["best_thresholds"]["on_time_0_4"]
+    assert report["tau"] == best["tau"] and report["at_tau"]["on_time_0_4"] == pytest.approx(best["on_time_0_4"])
+    for entry in report["constrained_latency"].values():
+        if entry["validation"]["feasible"]:
+            assert entry["test_at_validation_tau"]["latency_mean"] == pytest.approx(entry["test_curve"]["latency_mean"])
+    assert len(questions(payload)) == 40
+
+
 def test_on_time_0_4_counts_answers_from_the_target_pair_to_4_pairs_after_it():
     # Target pair 5; first firing at pairs 3 (premature), 5, 9 (4 late), 10 (5 late) and never.
     p = np.full((5, 12), 0.1)
