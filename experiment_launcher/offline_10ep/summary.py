@@ -1,6 +1,7 @@
-"""Сводка ablation голов на признаках нового офлайн-адаптера (mlp.sh, transformer.sh, compact.sh) — только validation.
+"""Сводка ablation голов на признаках нового офлайн-адаптера (mlp.sh, transformer.sh, compact.sh, combos.sh) — только
+validation.
 
-Из results.json каждого запуска results/lora/<arch>/<группа>_<arch>_<suffix> (метрики best.pt на validation):
+Из results.json каждого запуска results/lora/<arch>/<группы через _>_<arch>_<suffix> (метрики best.pt на validation):
 - выбор best.pt: лучшая эпоха и AUROC классификации префиксов в окне |k − t*| <= 2 (критерий выбора), BCE там же;
 - on_time_0_4 при лучшем τ validation (ответ через 0..4 пары после целевой);
 - задержка (пары после t*; среднее / медиана) при доле преждевременных ответов <= R и точности непреждевременных >= A.
@@ -12,8 +13,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ARCHITECTURES = {"mlp": "mlp", "transformer": "base", "compact": "compact"}
-GROUPS = ("lm", "attention", "entropy", "vision", "confidence")
+ARCHITECTURES = {"mlp": "mlp", "transformer": "base", "compact": "compact"}  # каталог результатов -> метка в id
 
 
 def latency(point) -> str:
@@ -30,10 +30,9 @@ def main() -> None:
 
     rows, keys = [], None
     for architecture, tag in ARCHITECTURES.items():
-        for group in GROUPS:
-            path = ROOT / "results" / "lora" / architecture / f"{group}_{tag}_{args.suffix}" / "results.json"
-            if not path.exists():
-                continue
+        ending = f"_{tag}_{args.suffix}"
+        for path in sorted((ROOT / "results" / "lora" / architecture).glob(f"*{ending}/results.json")):
+            group = "+".join(path.parent.name[:-len(ending)].split("_"))
             result = json.loads(path.read_text(encoding="utf-8"))
             validation = result["validation"]
             constrained = validation.get("constrained_latency") or {}
@@ -49,14 +48,15 @@ def main() -> None:
         raise SystemExit(f"Нет results.json запусков *_{args.suffix} в results/lora/")
 
     keys = keys or []
-    header = f"{'модель':12s} {'группа':11s} {'эп.':>3s} {'AUROC±2':>8s} {'BCE±2':>7s} {'on_time':>8s} {'τ':>6s} " + \
+    width = max(11, *(len(row["group"]) for row in rows))
+    header = f"{'модель':12s} {'группы':{width}s} {'эп.':>3s} {'AUROC±2':>8s} {'BCE±2':>7s} {'on_time':>8s} {'τ':>6s} " + \
         " ".join(f"{key:>12s}" for key in keys)
     print(f"Validation, {rows[0]['questions']} вопросов; задержка — пары после t*, среднее/медиана")
     print(header)
     for row in sorted(rows, key=lambda r: -r["auroc_pm2"]):
         on_time = "-" if row["on_time_0_4"] is None else f"{row['on_time_0_4']:.4f}"
         tau = "-" if row["on_time_0_4_tau"] is None else f"{row['on_time_0_4_tau']:.3f}"
-        print(f"{row['architecture']:12s} {row['group']:11s} {row['best_epoch']:>3} {row['auroc_pm2']:8.4f} "
+        print(f"{row['architecture']:12s} {row['group']:{width}s} {row['best_epoch']:>3} {row['auroc_pm2']:8.4f} "
               f"{row['bce_pm2']:7.4f} {on_time:>8s} {tau:>6s} " +
               " ".join(f"{latency(row['constrained_latency'].get(key)):>12s}" for key in keys))
     output = Path(args.output) if args.output else ROOT / "results" / "lora" / f"summary_{args.suffix}.json"
