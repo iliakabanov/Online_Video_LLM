@@ -1,0 +1,422 @@
+{
+  "online": "outputs/listen_sft_10ep/epoch_10",
+  "head": "lora/mlp/lm_attention_entropy_vision_confidence_mlp_off10",
+  "criterion": "on_time_0_4",
+  "questions": 3229,
+  "metrics": {
+    "classification:auroc_pm2": {
+      "online": 0.9149621348412789,
+      "head": 0.8741327942183712
+    },
+    "classification:binary_cross_entropy_pm2": {
+      "online": 0.52327072491641,
+      "head": 0.7620589126923257
+    },
+    "classification:auroc": {
+      "online": 0.9961238783189473,
+      "head": 0.9942679348837529
+    },
+    "latency:auc": {
+      "online": 0.9397751016091376,
+      "head": 0.9276324185422373
+    },
+    "latency:auc_2": {
+      "online": 0.9012626647961659,
+      "head": 0.877797802720986
+    },
+    "latency:auc_5": {
+      "online": 0.9218663204443397,
+      "head": 0.9028844454210214
+    },
+    "latency:start_accuracy": {
+      "online": 0.4394549396097863,
+      "head": 0.40848559925673583
+    },
+    "latency:end_accuracy": {
+      "online": 0.9414679467327346,
+      "head": 0.9290802105915144
+    },
+    "tau:τ": {
+      "online": 0.9511217474937439,
+      "head": 0.991342157125473
+    },
+    "at_tau:on_time_0_4": {
+      "online": 0.8358624961288325,
+      "head": 0.7900278724063178
+    },
+    "at_tau:on_time_0_9": {
+      "online": 0.8792195726231031,
+      "head": 0.8429854444100341
+    },
+    "at_tau:on_target_pm2": {
+      "online": 0.8117064106534531,
+      "head": 0.737379993806132
+    },
+    "at_tau:premature_rate": {
+      "online": 0.07587488386497368,
+      "head": 0.1028182099721276
+    },
+    "at_tau:late_rate": {
+      "online": 0.5890368535150201,
+      "head": 0.6280582223598637
+    },
+    "at_tau:missed_rate": {
+      "online": 0.013007122948281201,
+      "head": 0.01796221740476928
+    },
+    "at_tau:answer_accuracy": {
+      "online": 0.9173118612573552,
+      "head": 0.8947042427996283
+    },
+    "at_tau:timely_correct_0_4": {
+      "online": 0.7996283679157634,
+      "head": 0.7475998761226386
+    },
+    "at_tau:timely_correct_0_9": {
+      "online": 0.835552802725302,
+      "head": 0.7943635800557448
+    },
+    "at_tau:timely_correct_pm2": {
+      "online": 0.7757819758439145,
+      "head": 0.6952616909259832
+    },
+    "at_0.5:on_time_0_4": {
+      "online": 0.7287085785072778,
+      "head": 0.6069990709197894
+    },
+    "at_0.5:on_time_0_9": {
+      "online": 0.743573861876742,
+      "head": 0.6277485289563333
+    },
+    "at_0.5:premature_rate": {
+      "online": 0.24187054815732426,
+      "head": 0.35707649427067206
+    },
+    "at_0.5:missed_rate": {
+      "online": 0.0024775472282440383,
+      "head": 0.0006193868070610096
+    },
+    "at_0.5:timely_correct_0_4": {
+      "online": 0.6992877051718799,
+      "head": 0.5729327965314339
+    }
+  },
+  "constrained_latency": {
+    "online": {
+      "R0.05_A0.85": {
+        "validation": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9796676635742188,
+          "tau_high": 0.9808759689331055,
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04882514494964907,
+          "accuracy": 0.9284568495348091,
+          "timely_correct": 0.8831248092767775,
+          "forced_rate": 0.03295697284101312,
+          "latency_mean": 2.7317933910811676,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04862186435428925,
+          "accuracy": 0.9423828125,
+          "timely_correct": 0.8965624032208114,
+          "forced_rate": 0.04211830288014865,
+          "latency_mean": 2.6559244791666665,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9796676635742188,
+          "tau_high": 0.9808759689331055,
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04862186435428925,
+          "accuracy": 0.9423828125,
+          "timely_correct": 0.8965624032208114,
+          "forced_rate": 0.04211830288014865,
+          "latency_mean": 2.6559244791666665,
+          "latency_median": 1.0
+        }
+      },
+      "R0.05_A0.9": {
+        "validation": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9796676635742188,
+          "tau_high": 0.9808759689331055,
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04882514494964907,
+          "accuracy": 0.9284568495348091,
+          "timely_correct": 0.8831248092767775,
+          "forced_rate": 0.03295697284101312,
+          "latency_mean": 2.7317933910811676,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04862186435428925,
+          "accuracy": 0.9423828125,
+          "timely_correct": 0.8965624032208114,
+          "forced_rate": 0.04211830288014865,
+          "latency_mean": 2.6559244791666665,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9796676635742188,
+          "tau_high": 0.9808759689331055,
+          "tau": 0.9802718162536621,
+          "premature_rate": 0.04862186435428925,
+          "accuracy": 0.9423828125,
+          "timely_correct": 0.8965624032208114,
+          "forced_rate": 0.04211830288014865,
+          "latency_mean": 2.6559244791666665,
+          "latency_median": 1.0
+        }
+      },
+      "R0.1_A0.85": {
+        "validation": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9196425676345825,
+          "tau_high": 0.9241418242454529,
+          "tau": 0.9218921959400177,
+          "premature_rate": 0.09520903265181568,
+          "accuracy": 0.9284991568296797,
+          "timely_correct": 0.8400976502898992,
+          "forced_rate": 0.006103143118706134,
+          "latency_mean": 1.9295109612141652,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9218921959400177,
+          "premature_rate": 0.09507587488386497,
+          "accuracy": 0.9431895961670089,
+          "timely_correct": 0.8535150201300712,
+          "forced_rate": 0.00836172189532363,
+          "latency_mean": 1.840520191649555,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9149009585380554,
+          "tau_high": 0.9196425676345825,
+          "tau": 0.917271763086319,
+          "premature_rate": 0.09507587488386497,
+          "accuracy": 0.9428473648186174,
+          "timely_correct": 0.8532053267265407,
+          "forced_rate": 0.00836172189532363,
+          "latency_mean": 1.8381245722108146,
+          "latency_median": 1.0
+        }
+      },
+      "R0.1_A0.9": {
+        "validation": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9196425676345825,
+          "tau_high": 0.9241418242454529,
+          "tau": 0.9218921959400177,
+          "premature_rate": 0.09520903265181568,
+          "accuracy": 0.9284991568296797,
+          "timely_correct": 0.8400976502898992,
+          "forced_rate": 0.006103143118706134,
+          "latency_mean": 1.9295109612141652,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9218921959400177,
+          "premature_rate": 0.09507587488386497,
+          "accuracy": 0.9431895961670089,
+          "timely_correct": 0.8535150201300712,
+          "forced_rate": 0.00836172189532363,
+          "latency_mean": 1.840520191649555,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9149009585380554,
+          "tau_high": 0.9196425676345825,
+          "tau": 0.917271763086319,
+          "premature_rate": 0.09507587488386497,
+          "accuracy": 0.9428473648186174,
+          "timely_correct": 0.8532053267265407,
+          "forced_rate": 0.00836172189532363,
+          "latency_mean": 1.8381245722108146,
+          "latency_median": 1.0
+        }
+      }
+    },
+    "head": {
+      "R0.05_A0.85": {
+        "validation": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9997766613960266,
+          "tau_high": 0.9997767806053162,
+          "tau": 0.9997767210006714,
+          "premature_rate": 0.04974061641745499,
+          "accuracy": 0.930635838150289,
+          "timely_correct": 0.8843454379005188,
+          "forced_rate": 0.06225205981080256,
+          "latency_mean": 4.144829800899165,
+          "latency_median": 2.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9997767210006714,
+          "premature_rate": 0.03375658098482502,
+          "accuracy": 0.9320512820512821,
+          "timely_correct": 0.9005884174667079,
+          "forced_rate": 0.07339733663672963,
+          "latency_mean": 3.9625,
+          "latency_median": 2.0
+        },
+        "test_curve": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9990566372871399,
+          "tau_high": 0.9990584254264832,
+          "tau": 0.9990575313568115,
+          "premature_rate": 0.049860637968411274,
+          "accuracy": 0.932529335071708,
+          "timely_correct": 0.8860328275007743,
+          "forced_rate": 0.04583462372251471,
+          "latency_mean": 3.128096479791395,
+          "latency_median": 2.0
+        }
+      },
+      "R0.05_A0.9": {
+        "validation": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9997766613960266,
+          "tau_high": 0.9997767806053162,
+          "tau": 0.9997767210006714,
+          "premature_rate": 0.04974061641745499,
+          "accuracy": 0.930635838150289,
+          "timely_correct": 0.8843454379005188,
+          "forced_rate": 0.06225205981080256,
+          "latency_mean": 4.144829800899165,
+          "latency_median": 2.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9997767210006714,
+          "premature_rate": 0.03375658098482502,
+          "accuracy": 0.9320512820512821,
+          "timely_correct": 0.9005884174667079,
+          "forced_rate": 0.07339733663672963,
+          "latency_mean": 3.9625,
+          "latency_median": 2.0
+        },
+        "test_curve": {
+          "premature_budget": 0.05,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9990566372871399,
+          "tau_high": 0.9990584254264832,
+          "tau": 0.9990575313568115,
+          "premature_rate": 0.049860637968411274,
+          "accuracy": 0.932529335071708,
+          "timely_correct": 0.8860328275007743,
+          "forced_rate": 0.04583462372251471,
+          "latency_mean": 3.128096479791395,
+          "latency_median": 2.0
+        }
+      },
+      "R0.1_A0.85": {
+        "validation": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.995488703250885,
+          "tau_high": 0.9954907298088074,
+          "tau": 0.9954897165298462,
+          "premature_rate": 0.09948123283490998,
+          "accuracy": 0.9335818366655371,
+          "timely_correct": 0.8407079646017699,
+          "forced_rate": 0.021666158071406774,
+          "latency_mean": 2.6147068790240597,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9954897165298462,
+          "premature_rate": 0.08485599256735832,
+          "accuracy": 0.932994923857868,
+          "timely_correct": 0.8538247135336018,
+          "forced_rate": 0.026014245896562403,
+          "latency_mean": 2.502876480541455,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.85,
+          "feasible": true,
+          "tau_low": 0.9918782711029053,
+          "tau_high": 0.9918844699859619,
+          "tau": 0.9918813705444336,
+          "premature_rate": 0.09972127593682255,
+          "accuracy": 0.9332645338837289,
+          "timely_correct": 0.8401982037782595,
+          "forced_rate": 0.018581604211830288,
+          "latency_mean": 2.2941176470588234,
+          "latency_median": 1.0
+        }
+      },
+      "R0.1_A0.9": {
+        "validation": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.995488703250885,
+          "tau_high": 0.9954907298088074,
+          "tau": 0.9954897165298462,
+          "premature_rate": 0.09948123283490998,
+          "accuracy": 0.9335818366655371,
+          "timely_correct": 0.8407079646017699,
+          "forced_rate": 0.021666158071406774,
+          "latency_mean": 2.6147068790240597,
+          "latency_median": 1.0
+        },
+        "test_at_validation_tau": {
+          "tau": 0.9954897165298462,
+          "premature_rate": 0.08485599256735832,
+          "accuracy": 0.932994923857868,
+          "timely_correct": 0.8538247135336018,
+          "forced_rate": 0.026014245896562403,
+          "latency_mean": 2.502876480541455,
+          "latency_median": 1.0
+        },
+        "test_curve": {
+          "premature_budget": 0.1,
+          "accuracy_level": 0.9,
+          "feasible": true,
+          "tau_low": 0.9918782711029053,
+          "tau_high": 0.9918844699859619,
+          "tau": 0.9918813705444336,
+          "premature_rate": 0.09972127593682255,
+          "accuracy": 0.9332645338837289,
+          "timely_correct": 0.8401982037782595,
+          "forced_rate": 0.018581604211830288,
+          "latency_mean": 2.2941176470588234,
+          "latency_median": 1.0
+        }
+      }
+    }
+  }
+}
