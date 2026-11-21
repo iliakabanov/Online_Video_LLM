@@ -1,0 +1,20 @@
+# SB-0.5B: the separate decision module on LLaVA-OneVision-0.5B (Qwen2-0.5B + SigLIP), scripts/train_separate.py.
+# LoRA as M_off (configs/model/qwen_3b_lora_sft.yaml): q/k/v/o of every language-model layer, r 32, alpha 64.
+backbone:
+  model_id: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
+  revision: null  # resolved to the Hub commit and saved in model.yaml of the run
+  dtype: bfloat16
+  quantization: null
+lora:
+  enabled: true
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  component: language_model
+  modules: [q_proj, k_proj, v_proj, o_proj]
+  layers: null
+head:  # unused by the decision module (its head is configs/uhead/default.yaml on last_hidden)
+  classes: [silent, prepare, speak]
+  hidden_dims: [512]
+  activation: gelu
+  dropout: 0.1
