@@ -15,6 +15,179 @@ def test_ideal_timing_and_seconds():
     assert metrics["timing_mean_seconds"] == 0
 
 
+def test_window_classification_keeps_only_pairs_near_the_target():
+    """Far pairs are easy: perfect over all pairs, but within ±2 of t* the scores do not separate."""
+    p = np.array([[0.0, 0.0, 0.0, 0.6, 0.5, 0.6, 0.5, 1.0, 1.0, 1.0]])  # t* = 5
+    c = evaluate_readiness(p, [5], [5], [0.5], 2, 1)["classification"]
+    assert c["count_pm2"] == 5 and c["count_pm5"] == 10 and c["count"] == 10
+    # Within ±2 (pairs 3..7): negatives 0.6, 0.5; positives 0.6, 0.5, 1.0 -> AUROC (1 + .5 + .5 + 2 * 1 + 0) / 6.
+    assert c["auroc_pm2"] == pytest.approx((0.5 + 1 + 0 + 0.5 + 1 + 1) / 6)
+    assert c["auroc_pm2"] < c["auroc"]
+    assert c["f1_pm2"] == pytest.approx(2 * 0.6 * 1.0 / 1.6)  # precision 3/5, recall 3/3 at p >= 0.5
+    near, label = p[0, 3:8], np.array([0, 0, 1, 1, 1])
+    assert c["binary_cross_entropy_pm2"] == pytest.approx(
+        -np.mean(label * np.log(np.clip(near, 1e-7, 1)) + (1 - label) * np.log(np.clip(1 - near, 1e-7, 1))))
+    assert c["brier_score_pm2"] == pytest.approx(np.mean((near - label) ** 2))
+
+
+def test_latency_accuracy_curve_by_hand():
+    """t* = 1, P = 3. Question 0 is right only at pair 2, question 1 at pairs 0 and 2. As τ grows: τ < .2 both answer at
+    pair 0 (lateness 0, accuracy .5); τ in [.6, .8) question 1 waits to the end (lateness .5, still .5); τ >= .8 both
+    answer at pair 2 (lateness 1, accuracy 1)."""
+    from online_vllm.eval.metrics import latency_accuracy
+    p = np.array([[.2, .8, .9], [.6, .3, .7]])
+    result = latency_accuracy(p, [1, 1], np.ones_like(p, dtype=bool), [[0, 0, 1], [1, 0, 1]])
+    assert result["max_lateness_pairs"] == 1 and result["start_accuracy"] == .5 and result["end_accuracy"] == 1
+    assert result["auc"] == pytest.approx(.5)  # accuracy .5 on lateness [0, 1), 1 at 1
+    assert result["auc_10"] == pytest.approx((.5 * 1 + 1 * 9) / 10)
+    assert result["auc_2"] == pytest.approx((.5 * 1 + 1 * 1) / 2)
+    assert result["accuracy_at"] == {"0": .5, "1": 1, "2": 1, "5": 1, "10": 1}
+    assert evaluate_readiness(p, [1, 1], [1, 1], [.5], 1, 1, correct=[[0, 0, 1], [1, 0, 1]])["latency_accuracy"] == \
+        result
+    assert evaluate_readiness(p, [1, 1], [1, 1], [.5], 1, 1)["latency_accuracy"] is None
+
+
+def test_latency_accuracy_equals_a_sweep_over_every_threshold():
+    from online_vllm.eval.metrics import latency_accuracy
+    rng = np.random.default_rng(0)
+    p = rng.random((30, 12)).round(2)  # ties between and within questions
+    lengths = rng.integers(4, 13, 30)
+    mask = np.arange(12) < lengths[:, None]
+    targets = [int(rng.integers(0, n)) for n in lengths]
+    correct = rng.random((30, 12)) < np.linspace(.3, .9, 12)
+    points = []
+    for tau in np.r_[-1, np.unique(p)]:
+        late = right = 0
+        for row, t, n, c in zip(p, targets, lengths, correct):
+            hits = np.flatnonzero(row[:n] > tau)
+            k = int(hits[0]) if len(hits) else n - 1
+            late += max(k - t, 0); right += c[k]
+        points.append((late / 30, right / 30))
+    x, y = np.array(points).T
+    best, total = np.maximum.accumulate(y), x[-1]
+    expected = np.sum(best * np.diff(np.r_[x, total])) / total
+    assert latency_accuracy(p, targets, mask, correct)["auc"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("metric", ["on_target_pm2", "on_time_0_4"])
+def test_best_window_threshold_is_the_maximum_over_every_threshold(metric):
+    from online_vllm.eval.metrics import THRESHOLD_WINDOWS, best_window_threshold
+    rng = np.random.default_rng(1)
+    p = rng.random((40, 16)).round(2)
+    p[0, 0], p[1, :] = 0.0, 1.0  # exact 0 and 1 as float32 softmax gives
+    lengths = rng.integers(6, 17, 40)
+    mask = np.arange(16) < lengths[:, None]
+    targets = [int(rng.integers(0, n)) for n in lengths]
+    best = best_window_threshold(p, targets, mask, THRESHOLD_WINDOWS[metric])
+    assert best["metric"] == metric and 0 < best["tau_low"] <= best["tau"] < best["tau_high"] <= 1
+    grid = sorted({*np.unique(p[mask]), *(np.unique(p[mask]) + 0.005)} - {0.0} - {1.0})
+    swept = evaluate_readiness(p, targets, targets, [t for t in grid if 0 < t < 1], 1, 1, valid_mask=mask)["thresholds"]
+    assert best[metric] == pytest.approx(max(v[metric] for v in swept.values()))
+    at_best = evaluate_readiness(p, targets, targets, [best["tau"]], 1, 1, valid_mask=mask)["thresholds"]
+    assert at_best[str(best["tau"])][metric] == pytest.approx(best[metric])
+    assert evaluate_readiness(p, targets, targets, [.5], 1, 1, valid_mask=mask)["best_thresholds"][metric] == best
+    if metric == "on_target_pm2":
+        assert best_window_threshold(p, targets, mask, 2) == best
+
+
+def test_constrained_latency_is_the_smallest_mean_latency_over_every_threshold():
+    from online_vllm.eval.metrics import constrained_latency, operating_point
+    rng = np.random.default_rng(3)
+    p = rng.random((60, 16)).round(2)
+    p[0, 0] = 1.0
+    lengths = rng.integers(6, 17, 60)
+    mask = np.arange(16) < lengths[:, None]
+    targets = [int(rng.integers(0, n)) for n in lengths]
+    correct = [rng.random(16) < np.clip(0.4 + 0.1 * (np.arange(16) - t), 0, 1) for t in targets]  # верно чаще после t*
+    budgets, levels = (0.05, 0.3), (0.5, 0.8, 0.99)
+    result = constrained_latency(p, targets, mask, correct, budgets, levels)
+    grid = sorted({*np.unique(p[mask]), *(np.unique(p[mask]) + 0.005)} - {0.0, 1.0})
+    points = [operating_point(p, targets, mask, correct, tau) for tau in grid if 0 < tau < 1]
+    for budget in budgets:
+        for level in levels:
+            got = result[f"R{budget:g}_A{level:g}"]
+            ok = [q for q in points if q["premature_rate"] <= budget and q["accuracy"] is not None
+                  and q["accuracy"] >= level]
+            assert got["feasible"] == bool(ok)
+            if ok:
+                assert got["latency_mean"] == pytest.approx(min(q["latency_mean"] for q in ok))
+                assert got["premature_rate"] <= budget and got["accuracy"] >= level
+                assert got["tau_low"] <= got["tau"] < got["tau_high"]
+    # Преждевременный ответ — ошибка при любой верности: точность и задержка только по ответам с k >= t*.
+    point = operating_point(np.array([[0.9, 0.1, 0.1, 0.1], [0.1, 0.1, 0.9, 0.1], [0.1, 0.1, 0.1, 0.1]]), [2, 1, 1],
+                            np.ones((3, 4), bool), [np.ones(4, bool)] * 3, 0.5)
+    assert point["premature_rate"] == pytest.approx(1 / 3) and point["accuracy"] == 1.0
+    assert point["forced_rate"] == pytest.approx(1 / 3) and point["latency_mean"] == pytest.approx((1 + 2) / 2)
+
+
+def test_test_report_takes_the_threshold_from_validation():
+    """eval/report.py: τ of the validation applied to the test; with the test equal to the validation it is the best
+    τ of the test itself, and the constrained latency at the validation τ is the test curve's point."""
+    from online_vllm.eval.report import questions, test_report
+    from online_vllm.eval.thresholds import sweep
+    rng = np.random.default_rng(5)
+    rows = []
+    for i in range(40):
+        n, t = int(rng.integers(6, 14)), int(rng.integers(1, 5))
+        p = np.clip(np.where(np.arange(n) >= t, 0.6, 0.2) + rng.random(n) * 0.4, 0, 1)
+        rows.append({"record_id": f"q{i}", "probabilities": p.round(3).tolist(), "target_pair": t, "visible_pair": t,
+                     "fps": 25, "answer_correct": (np.arange(n) >= t - 1).tolist()})
+    payload = {"metadata": {"temporal_patch": 2, "frame_stride": 1}, "predictions": rows}
+    report = test_report(payload, payload)
+    best = sweep(payload, [0.5])["best_thresholds"]["on_time_0_4"]
+    assert report["tau"] == best["tau"] and report["at_tau"]["on_time_0_4"] == pytest.approx(best["on_time_0_4"])
+    for entry in report["constrained_latency"].values():
+        if entry["validation"]["feasible"]:
+            assert entry["test_at_validation_tau"]["latency_mean"] == pytest.approx(entry["test_curve"]["latency_mean"])
+    assert len(questions(payload)) == 40
+
+
+def test_two_detectors_with_two_thresholds():
+    """report.two_detector_report: "and" fires where both detectors exceed their thresholds, "or" where either does;
+    the extreme τ1 gives the second detector alone, so on the validation the pair is at least as good as each."""
+    from online_vllm.eval.report import ALWAYS, NEVER, combined, two_detector_report
+    from online_vllm.eval.thresholds import sweep
+    rng = np.random.default_rng(7)
+    first, second = [], []
+    for i in range(60):
+        n, t = int(rng.integers(6, 14)), int(rng.integers(1, 5))
+        base = np.where(np.arange(n) >= t, 0.6, 0.15)
+        row = {"record_id": f"q{i}", "target_pair": t, "visible_pair": t, "fps": 25,
+               "answer_correct": (np.arange(n) >= t - 1).tolist()}
+        first.append({**row, "probabilities": np.clip(base + rng.random(n) * 0.5, 0, 1).round(3).tolist()})
+        second.append({**row, "probabilities": np.clip(base + rng.random(n) * 0.5, 0, 1).round(3).tolist()})
+    meta = {"temporal_patch": 2, "frame_stride": 1}
+    p, q = {"metadata": meta, "predictions": first}, {"metadata": meta, "predictions": second}
+    scores = [np.asarray(r["probabilities"]) for r in second]
+    for mode, extreme in (("and", ALWAYS), ("or", NEVER)):
+        alone = combined(p, scores, extreme, mode)
+        assert all(np.allclose(r["probabilities"], s) for r, s in zip(alone["predictions"], scores))
+    # "and" at the pair: the first k with p_k > τ1 and q_k > τ2.
+    rule = combined(p, scores, 0.5, "and")
+    for r, a, s in zip(rule["predictions"], first, scores):
+        hits = np.flatnonzero(np.asarray(r["probabilities"]) > 0.7)
+        both = np.flatnonzero((np.asarray(a["probabilities"]) > 0.5) & (s > 0.7))
+        assert (hits[:1] == both[:1]).all()
+    single = max(sweep(x, [0.5])["best_thresholds"]["on_time_0_4"]["on_time_0_4"] for x in (p, q))
+    for mode in ("and", "or"):
+        report = two_detector_report(p, p, q, q, mode, grid=30)
+        assert report["validation_on_time_0_4"] >= single - 1e-12
+        assert report["at_tau"]["on_time_0_4"] == pytest.approx(report["validation_on_time_0_4"])  # test = validation
+
+
+def test_on_time_0_4_counts_answers_from_the_target_pair_to_4_pairs_after_it():
+    # Target pair 5; first firing at pairs 3 (premature), 5, 9 (4 late), 10 (5 late) and never.
+    p = np.full((5, 12), 0.1)
+    for row, fired in enumerate((3, 5, 9, 10)):
+        p[row, fired:] = 0.9
+    correct = np.ones((5, 12), dtype=bool)
+    correct[2] = False  # the answer at pair 9 is wrong
+    metrics = evaluate_readiness(p, [5] * 5, [5] * 5, [0.5], 2, 1, correct=correct)["thresholds"]["0.5"]
+    assert metrics["on_time_0_4"] == pytest.approx(2 / 5) and metrics["on_target_pm2"] == pytest.approx(2 / 5)
+    assert metrics["timely_correct_0_4"] == pytest.approx(1 / 5)
+    assert metrics["on_time_0_9"] == pytest.approx(3 / 5) and metrics["timely_correct_0_9"] == pytest.approx(2 / 5)
+
+
 def test_early_late_and_miss_timing_is_conditional():
     probabilities = np.array([[.9, .1, .1, .1], [.1, .1, .1, .9], [.1, .1, .1, .1]])
     result = evaluate_readiness(probabilities, [2, 2, 2], [1, 1, 1], [0.5], 2, 1)

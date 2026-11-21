@@ -9,6 +9,9 @@ from uhead.train import load_checkpoint, save_checkpoint
 from uhead.train import _pad_probabilities, binary_loss, split_by_video
 from uhead.data import LabelledItem, confidence_features, feature_rows
 
+# The groups of the default config (offline-model features); listen_token_logit exists only in online features.
+OFFLINE_DIMS = {name: dim for name, dim in FEATURE_DIMS.items() if name in UHeadConfig().groups}
+
 
 def small_config():
     return UHeadConfig(
@@ -26,7 +29,7 @@ def small_compact_config():
 
 
 def features(batch=2, steps=4):
-    return {name: torch.randn(batch, steps, dim) for name, dim in FEATURE_DIMS.items()}
+    return {name: torch.randn(batch, steps, dim) for name, dim in OFFLINE_DIMS.items()}
 
 
 def test_default_architecture_dimensions():
@@ -40,7 +43,7 @@ def test_default_architecture_dimensions():
 
 def test_forward_backward_padding_and_zero_variance_normalization():
     model = UHead(small_config())
-    stats = {name: (torch.zeros(dim), torch.zeros(dim)) for name, dim in FEATURE_DIMS.items()}
+    stats = {name: (torch.zeros(dim), torch.zeros(dim)) for name, dim in OFFLINE_DIMS.items()}
     model.set_normalization(stats)
     x = features()
     padding = torch.tensor([[False, False, False, False], [False, False, True, True]])
@@ -67,7 +70,7 @@ def test_eval_split_keeps_every_video_in_one_half():
 
 def test_constant_train_columns_are_only_centered():
     model = UHead(small_config())
-    stats = {name: (torch.zeros(dim), torch.full((dim,), 2.0)) for name, dim in FEATURE_DIMS.items()}
+    stats = {name: (torch.zeros(dim), torch.full((dim,), 2.0)) for name, dim in OFFLINE_DIMS.items()}
     stats["lm"][1][:3] = 0.0
     model.set_normalization(stats)
     std = model.fusion_block.lm_std
@@ -121,10 +124,34 @@ def test_compact_and_mlp_capacities_differ_by_132_for_every_ablation():
         assert mlp_parameters - compact_parameters == 132
 
 
+def test_head_on_online_features_keeps_their_dimensions(tmp_path):
+    """Online-model features: a wider attention group and listen_token_logit. The head is built for the input sizes
+    in config.input_dims and restores with them; a config written before listen_token_logit still loads."""
+    config = UHeadConfig(groups=["attention", "listen_token_logit"],
+                         projection_dims={"lm": 8, "attention": 8, "entropy": 4, "vision": 4, "confidence": 4,
+                                          "listen_token_logit": 4},
+                         input_dims={"attention": 100, "listen_token_logit": 3}, model_dim=16, nhead=4,
+                         num_layers=1, dropout=0.0, temporal_detector="mlp")
+    config.validate()
+    model = StateHead(config).eval()
+    model.set_normalization({"attention": (torch.zeros(100), torch.ones(100)),
+                             "listen_token_logit": (torch.zeros(3), torch.ones(3))})
+    x = {"attention": torch.randn(2, 4, 100), "listen_token_logit": torch.randn(2, 4, 3)}
+    save_checkpoint(model, config, _TrainConfig(), tmp_path)
+    from uhead.train import head_config
+    restored = load_checkpoint(tmp_path).eval()
+    assert head_config(restored).input_dims == {"attention": 100, "listen_token_logit": 3}
+    with torch.no_grad():
+        torch.testing.assert_close(model(x), restored(x))
+    old = UHeadConfig.from_dict({"groups": ["lm"], "projection_dims": {"lm": 8, "attention": 8, "entropy": 4,
+                                                                       "vision": 4, "confidence": 4}})
+    assert old.projection_dims["listen_token_logit"] == 16 and old.input_dims == {}
+
+
 def test_checkpoint_restores_normalization(tmp_path):
     config = small_config()
     model = UHead(config).eval()
-    stats = {name: (torch.full((dim,), 2.0), torch.full((dim,), 3.0)) for name, dim in FEATURE_DIMS.items()}
+    stats = {name: (torch.full((dim,), 2.0), torch.full((dim,), 3.0)) for name, dim in OFFLINE_DIMS.items()}
     model.set_normalization(stats)
     save_checkpoint(model, config, _TrainConfig(), tmp_path)
     checkpoint = torch.load(tmp_path / "uhead.pt", map_location="cpu", weights_only=True)
@@ -134,7 +161,7 @@ def test_checkpoint_restores_normalization(tmp_path):
     x = features(batch=1)
     with torch.no_grad():
         torch.testing.assert_close(model(x), restored(x))
-    for name in FEATURE_DIMS:
+    for name in OFFLINE_DIMS:
         torch.testing.assert_close(getattr(restored.fusion_block, f"{name}_mean"), stats[name][0])
 
 
@@ -181,11 +208,47 @@ def test_ragged_probabilities_are_right_padded_only_for_evaluation():
     assert mask.tolist() == [[True, True, False], [True, True, True]]
 
 
+def test_results_keep_the_metrics_over_every_threshold():
+    """results.json (validation) и test_*.json (uhead.evaluate) несут те же метрики по всем порогам, что и онлайн-SFT:
+    latency_accuracy, best_thresholds, constrained_latency; всё сериализуется без NaN."""
+    import json
+    from uhead.train import THRESHOLD_FREE_KEYS, _readiness
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(20):
+        n, target = int(rng.integers(6, 12)), int(rng.integers(1, 5))
+        p = np.clip(np.sort(rng.random(n)) + (np.arange(n) >= target) * 0.3, 0, 1)
+        rows.append({"probabilities": p, "target_pair": target, "visible_pair": target, "fps": 25.0,
+                     "answer_correct": (np.arange(n) >= target).tolist()})
+    result = _readiness(rows, [0.5], {"temporal_patch": 2, "frame_stride": 1})
+    assert all(result[key] is not None for key in THRESHOLD_FREE_KEYS)
+    assert {"on_target_pm2", "on_time_0_4"} <= set(result["best_thresholds"])
+    assert "R0.05_A0.85" in result["constrained_latency"]
+    json.dumps({key: result[key] for key in THRESHOLD_FREE_KEYS}, allow_nan=False)
+    without = _readiness([{k: v for k, v in row.items() if k != "answer_correct"} for row in rows], [0.5],
+                         {"temporal_patch": 2, "frame_stride": 1})
+    assert without["latency_accuracy"] is None and without["constrained_latency"] is None
+
+
+def test_epoch_selection_auroc_is_the_validation_window_auroc():
+    """--selection auroc_pm2 выбирает best.pt по window_auroc: тот же AUROC в окне ±2, что в results.json."""
+    from uhead.train import SELECTIONS, _readiness, build_parser, window_auroc
+    rng = np.random.default_rng(1)
+    rows = []
+    for _ in range(30):
+        n, target = int(rng.integers(6, 12)), int(rng.integers(1, 5))
+        rows.append({"probabilities": rng.random(n), "target_pair": target, "visible_pair": target, "fps": 25.0})
+    expected = _readiness(rows, [0.5], {"temporal_patch": 2, "frame_stride": 1})["classification"]["auroc_pm2"]
+    assert window_auroc(rows) == expected
+    assert SELECTIONS == ("loss", "auroc_pm2")
+    assert build_parser().parse_args(["--tags", "hard", "--output", "x"]).selection == "loss"
+
+
 def test_feature_rows_does_not_read_unselected_groups():
     class FakeFeatures:
         def __init__(self):
             self.calls = []
-            self.meta = {"max_choices": 4}
+            self.meta = {"max_choices": 4, "shapes": {"probe_logprob": [15]}}
         def question(self, name, index):
             self.calls.append(name)
             if name != "probe_logprob":
