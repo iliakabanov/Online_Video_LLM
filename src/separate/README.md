@@ -2,8 +2,8 @@
 
 Отдельная VLM смотрит поток и решает, когда будить отвечающую модель. Отвечает всегда офлайн-модель M_off, поэтому
 сравнение с головами на признаках M_off (A) касается только тайминга. Код — [decision.py](decision.py), запуск —
-`scripts/train_separate.py`, `scripts/evaluate_separate.py`, весь эксперимент — `experiment_launcher/separate/run.sh`,
-тесты — `tests/test_separate.py`.
+обучение — `scripts/train_separate.py`, оценка (порог на validation, test, таблица) — `experiment_launcher/separate/run.sh`
+(внутри — `scripts/evaluate_separate.py`), тесты — `tests/test_separate.py`.
 
 ```
 [вопрос] [пара 0] <act> [пара 1] <act> … [пара 63] <act>
@@ -45,7 +45,7 @@
 |---|---|---|---|
 | 2 кадра × 196 (родное число токенов) | 392 | ~25 тыс. | ~115 ГБ |
 | 1 кадр × 196 | 196 | ~12,6 тыс. | ~58 ГБ |
-| **2 кадра × 49 (основной, по умолчанию в `run.sh`)** | 98 | ~6,3 тыс. | ~29 ГБ |
+| **2 кадра × 49 (основной, по умолчанию)** | 98 | ~6,3 тыс. | ~29 ГБ |
 | 1 кадр × 49 | 49 | ~3,2 тыс. | ~14 ГБ |
 
 Основной вариант — оба кадра пары по 49 токенов, `<act>` после пары. Энкодер Qwen склеивает два кадра пары в один
@@ -53,7 +53,7 @@
 уравнены кадры (модуль видит всё, что видит M_off) и разрешение токена (сетка 7×7 против 9×6 у Qwen); токенов вдвое
 больше, но по вычислениям SB-0.5B всё равно дешевле SB-3B (линейные слои ~в 3 раза, внимание примерно столько же).
 Пулинг 7×7 сильнее родного для LLaVA-OV (14×14), сдвиг признаков учит LoRA. Абляции: только последний кадр
-(`TRAIN_ARGS="--frames-per-pair 1"`), родные 196 токенов на кадр (`--tokens-side 14`).
+(`--frames-per-pair 1`), родные 196 токенов на кадр (`--tokens-side 14`).
 
 ## SB-3B: Qwen2.5-VL-3B
 
@@ -79,16 +79,34 @@ AdamW, постоянные lr: LoRA и `<act>` — 1e-4, weight decay 0.01 (к�
 До обучения и после каждой эпохи — оценка validation: `validation_metrics.jsonl`, `predictions_validation_epoch_<n>.json`.
 
 ```bash
+LLAVA=configs/model/llava_ov_0.5b_separate.yaml
 # пробный прогон: 3 видео, 20 вопросов validation, 1 эпоха — память, скорость, что всё пишется
-python scripts/train_separate.py --model-config configs/model/llava_ov_0.5b_separate.yaml \
-    --output outputs/separate/smoke --train-videos 3 --validation-questions 20 --epochs 1 --overwrite
-CUDA_VISIBLE_DEVICES=0 MODEL=llava bash experiment_launcher/separate/run.sh          # SB-0.5B: обучение, test, таблица
-CUDA_VISIBLE_DEVICES=0 MODEL=llava TRAIN_ARGS="--train-projector" RUN=outputs/separate/sb05b_proj \
-    bash experiment_launcher/separate/run.sh                                         # с обучаемым проектором
-CUDA_VISIBLE_DEVICES=0 MODEL=llava TRAIN_ARGS="--frames-per-pair 1" RUN=outputs/separate/sb05b_f1 \
-    bash experiment_launcher/separate/run.sh
-CUDA_VISIBLE_DEVICES=0 MODEL=qwen TRAIN_ARGS="--gradient-checkpointing" bash experiment_launcher/separate/run.sh  # SB-3B
+python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/smoke \
+    --train-videos 3 --validation-questions 20 --epochs 1 --overwrite
+# SB-0.5B (2 кадра × 49 — по умолчанию), с замороженным и с обучаемым проектором
+CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/sb05b
+CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/sb05b_proj \
+    --train-projector
+# SB-3B
+CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --output outputs/separate/sb3b --gradient-checkpointing
 ```
+
+Две версии SB-0.5B используют один кэш энкодера: вторую запускайте, когда первая его построит.
+
+## Оценка: порог на validation и test
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash experiment_launcher/separate/run.sh outputs/separate/sb05b
+ADAPTER=epoch_7 bash experiment_launcher/separate/run.sh outputs/separate/sb05b_proj   # другая эпоха
+```
+
+1. τ — точный максимум `on_time_0_4` (`CRITERION`) на validation-половине при эпохе адаптера
+   (`thresholds_validation_<adapter>.json`).
+2. Test-половина головы при этом τ и при τ = 0.5 (`scripts/evaluate_separate.py`: метрики, затраты).
+3. Метрики и предсказания без весов — в `results/separate/<прогон>/`.
+4. Таблица `results/separate/test_report.json` со всеми оценёнными прогонами SB, головами A, бейзлайнами и B.
+
+Незавершённый прогон (нет `complete`) с `ADAPTER=best` скрипт не оценивает: `best/` ещё может смениться.
 
 ## Продолжение прерванного обучения
 
@@ -97,8 +115,7 @@ python scripts/train_separate.py --output outputs/separate/sb05b --resume       
 python scripts/train_separate.py --output outputs/separate/sb05b --resume --epochs 15  # продлить готовый прогон
 ```
 
-`run.sh` делает это сам: если в каталоге прогона есть `separate.json`, но нет `complete`, тот же запуск продолжает
-обучение. С `--resume` настройки берутся из файлов прогона (`model.yaml`, `separate.json`, `split.json`,
+С `--resume` настройки берутся из файлов прогона (`model.yaml`, `separate.json`, `split.json`,
 `sft_config.json`); из флагов действуют только `--epochs`, `--device`, `--data-root`, `--num-workers`,
 `--encoder-frames`, `--eval-batch-size`.
 

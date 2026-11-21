@@ -1,85 +1,74 @@
 #!/usr/bin/env bash
-# Отдельный модуль решения (separate/decision.py): своя VLM, свежая LoRA, токен <act> после каждой пары и бинарная
-# голова; отвечает M_off. MODEL=llava — SB-0.5B (LLaVA-OneVision-0.5B), MODEL=qwen — SB-3B (Qwen2.5-VL-3B без адаптера
-# M_off). Данные, половины validation/test и ответы M_off — те же, что у голов офлайн-адаптера
-# (experiment_launcher/offline_10ep): train — первые 1000 видео половины для признаков, validation и test — вопросы
-# файлов предсказаний головы MLP last_hidden (results/lora/mlp/last_hidden_mlp_off10).
+# Оценка обученного отдельного модуля решения (обучение — отдельно: scripts/train_separate.py). Вопросы и ответы M_off —
+# те же, что у голов офлайн-адаптера: validation и test — половины головы MLP last_hidden
+# (results/lora/mlp/last_hidden_mlp_off10), на validation-половине модуль уже оценён при обучении.
 #
-#   1. обучение (scripts/train_separate.py, 10 эпох, best/ по AUROC в окне ±2) -> $RUN (веса, не в git); прерванный
-#      прогон (в $RUN есть separate.json, нет complete) тот же запуск продолжает с последней эпохи (--resume)
-#   2. test-половина головы при τ с validation (scripts/evaluate_separate.py) -> $RUN/head_test_<adapter>.json
+#   1. порог τ на validation: эпоха адаптера, критерий CRITERION (on_time_0_4: ответ через 0..4 пары после целевой,
+#      не раньше; или on_target_pm2) -> $RUN/thresholds_validation_<adapter>.json
+#   2. test-половина головы при этом τ и при τ = 0.5 (scripts/evaluate_separate.py) -> $RUN/head_test_<adapter>.json
 #   3. метрики и предсказания без весов -> results/separate/<имя прогона>/
 #   4. test-таблица: бейзлайны по уверенности, головы офлайн-адаптера, онлайн-модель и все прогоны из
 #      results/separate/ (scripts/test_report.py) -> results/separate/test_report.json
 #
-#   CUDA_VISIBLE_DEVICES=0 MODEL=llava bash experiment_launcher/separate/run.sh
-#   CUDA_VISIBLE_DEVICES=0 MODEL=qwen TRAIN_ARGS="--gradient-checkpointing" bash experiment_launcher/separate/run.sh
-# Переменные: MODEL (llava | qwen), RUN (каталог прогона; по умолчанию outputs/separate/sb05b или sb3b), ADAPTER
-# (best | last | epoch_<n>), OVERWRITE=1 (обучить заново), TRAIN_ARGS (флаги train_separate.py, например
-# "--frames-per-pair 1 --tokens-side 7" или "--tags sigmoid --seed 1"), ONLINE_RUN / ONLINE_ADAPTER (онлайн-модель
-# для таблицы).
+#   CUDA_VISIBLE_DEVICES=0 bash experiment_launcher/separate/run.sh outputs/separate/sb05b
+#   ADAPTER=epoch_7 bash experiment_launcher/separate/run.sh outputs/separate/sb05b_proj
+# Переменные: ADAPTER (best | last | epoch_<n>), CRITERION, ONLINE_RUN / ONLINE_ADAPTER (онлайн-модель для таблицы),
+# EVAL_ARGS (флаги evaluate_separate.py, например "--encoder-frames 8 --eval-batch-size 2").
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export DATA_ROOT="${DATA_ROOT:-$ROOT/data}"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 DEVICE="${DEVICE:-cuda}"
-MODEL="${MODEL:-llava}"
-# LLaVA-OV по умолчанию: оба кадра пары по 7 x 7 = 49 токенов (98 на пару), <act> после пары — те же кадры, что у
-# SB-3B (его токен склеивает два кадра пары, 54 на пару при 252x168), разрешение токена как у него. Другие варианты —
-# TRAIN_ARGS="--frames-per-pair 1" (только последний кадр, 49 на пару) или "--tokens-side 14" (родные 196 на кадр);
-# флаги TRAIN_ARGS идут позже и перекрывают эти. Проектор LLaVA-OV по умолчанию заморожен, обучить его целиком —
-# TRAIN_ARGS="--train-projector" (лучше с отдельным RUN, например outputs/separate/sb05b_proj).
-case "$MODEL" in
-  llava) MODEL_CONFIG="$ROOT/configs/model/llava_ov_0.5b_separate.yaml"; DEFAULT_RUN=sb05b
-         DEFAULT_ARGS=(--frames-per-pair 2 --tokens-side 7) ;;
-  qwen) MODEL_CONFIG="$ROOT/configs/model/qwen_3b_lora_sft.yaml"; DEFAULT_RUN=sb3b; DEFAULT_ARGS=() ;;
-  *) echo "MODEL: llava или qwen" >&2; exit 2 ;;
-esac
-RUN="${RUN:-$ROOT/outputs/separate/$DEFAULT_RUN}"
 ADAPTER="${ADAPTER:-best}"
-OVERWRITE="${OVERWRITE:-0}"
+CRITERION="${CRITERION:-on_time_0_4}"
 ONLINE_RUN="${ONLINE_RUN:-$ROOT/outputs/listen_sft_10ep}"
 ONLINE_ADAPTER="${ONLINE_ADAPTER:-epoch_10}"
 R="$ROOT/results/lora"
 REFERENCE="$R/mlp/last_hidden_mlp_off10"
-OUT="$ROOT/results/separate/$(basename "$RUN")"
-read -ra train_args <<< "${TRAIN_ARGS:-}"
+read -ra eval_args <<< "${EVAL_ARGS:-}"
 
+[[ $# -eq 1 ]] || { echo "Укажите каталог прогона train_separate.py, например outputs/separate/sb05b" >&2; exit 2; }
+RUN="$1"
+case "$CRITERION" in on_time_0_4|on_target_pm2) ;; *) echo "CRITERION: on_time_0_4 или on_target_pm2" >&2; exit 2 ;; esac
+[[ -f "$RUN/$ADAPTER/head.safetensors" ]] || { echo "Нет $RUN/$ADAPTER: прогон не обучен (train_separate.py)" >&2; exit 2; }
+if [[ ! -f "$RUN/complete" ]]; then
+  echo "!! $RUN обучен не до конца (нет complete): продолжить — python scripts/train_separate.py --output $RUN --resume" >&2
+  [[ "$ADAPTER" == "best" ]] && { echo "   best/ ещё может смениться; оценить промежуточную эпоху — ADAPTER=epoch_<n>" >&2; exit 2; }
+fi
+OUT="$ROOT/results/separate/$(basename "$RUN")"
 test_predictions() {  # предсказания best.pt головы на test (evaluate_test.sh), первый найденный файл
   ls "$R/mlp/$1"/predictions_test_best_tau*.json 2>/dev/null | head -n 1 || true
 }
 REFERENCE_TEST="$(test_predictions last_hidden_mlp_off10)"
 [[ -n "$REFERENCE_TEST" ]] || { echo "Нет test головы mlp/last_hidden_mlp_off10 (evaluate_test.sh)" >&2; exit 2; }
+EPOCH="$(FILE="$RUN/$ADAPTER/sft_metadata.json" python -c 'import json, os; print(json.load(open(os.environ["FILE"]))["epoch"])')"
+VALIDATION="$RUN/predictions_validation_epoch_${EPOCH}.json"  # validation-половина головы, эпоха адаптера
 
-echo "== 1. обучение ($MODEL) -> $RUN"
-if [[ -f "$RUN/complete" && "$OVERWRITE" != "1" ]]; then
-  echo "-- $RUN обучен полностью (OVERWRITE=1 — обучить заново)"
-elif [[ -f "$RUN/separate.json" && "$OVERWRITE" != "1" ]]; then
-  # Прерванный прогон: продолжить с last/ с его же настройками (TRAIN_ARGS здесь не действуют, кроме --epochs).
-  echo "-- $RUN прерван: продолжение с последней сохранённой эпохи"
-  python "$ROOT/scripts/train_separate.py" --output "$RUN" --resume --data-root "$DATA_ROOT" --device "$DEVICE" \
-    ${train_args[@]+"${train_args[@]}"}
-else
-  extra=()
-  [[ "$OVERWRITE" == "1" ]] && extra+=(--overwrite)
-  python "$ROOT/scripts/train_separate.py" --model-config "$MODEL_CONFIG" --output "$RUN" --data-root "$DATA_ROOT" \
-    --device "$DEVICE" --validation-from "$REFERENCE/predictions_validation.json" ${extra[@]+"${extra[@]}"} \
-    ${DEFAULT_ARGS[@]+"${DEFAULT_ARGS[@]}"} ${train_args[@]+"${train_args[@]}"}
-fi
+echo "== 1. порог на validation ($RUN/$ADAPTER, эпоха $EPOCH, критерий $CRITERION)"
+python -m online_vllm.eval.thresholds --predictions "$VALIDATION" \
+  --output "$RUN/thresholds_validation_${ADAPTER}.json" --thresholds 0.5
+TAU="$(FILE="$RUN/thresholds_validation_${ADAPTER}.json" CRITERION="$CRITERION" python - <<'PY'
+import json, os
+best = json.load(open(os.environ["FILE"], encoding="utf-8"))["best_thresholds"][os.environ["CRITERION"]]
+print(f"{best['tau']:.6g} (validation {os.environ['CRITERION']} = {100 * best[os.environ['CRITERION']]:.1f}%)")
+PY
+)"
+echo "-- τ = $TAU"
 
 echo "== 2. test-половина головы: $(basename "$REFERENCE_TEST")"
 python "$ROOT/scripts/evaluate_separate.py" --run "$RUN" --adapter "$ADAPTER" --name head_test \
-  --records-from "$REFERENCE_TEST" --data-root "$DATA_ROOT" --device "$DEVICE"
+  --records-from "$REFERENCE_TEST" --tau-from "$VALIDATION" --tau-criterion "$CRITERION" \
+  --data-root "$DATA_ROOT" --device "$DEVICE" ${eval_args[@]+"${eval_args[@]}"}
 
 echo "== 3. метрики без весов -> $OUT"
-EPOCH="$(FILE="$RUN/$ADAPTER/sft_metadata.json" python -c 'import json, os; print(json.load(open(os.environ["FILE"]))["epoch"])')"
 mkdir -p "$OUT"
 for file in separate.json split.json sft_config.json model.yaml validation_metrics.jsonl train_steps.jsonl; do
   cp "$RUN/$file" "$OUT/"
 done
 cp "$RUN/$ADAPTER/sft_metadata.json" "$OUT/${ADAPTER}_metadata.json"
-cp "$RUN/predictions_validation_epoch_${EPOCH}.json" "$OUT/predictions_validation.json"  # эпоха адаптера
+cp "$VALIDATION" "$OUT/predictions_validation.json"
+cp "$RUN/thresholds_validation_${ADAPTER}.json" "$OUT/thresholds_validation.json"
 cp "$RUN/head_test_${ADAPTER}.json" "$OUT/test_${ADAPTER}.json"
 cp "$RUN/predictions_head_test_${ADAPTER}.json" "$OUT/predictions_test_${ADAPTER}.json"
 
@@ -115,10 +104,11 @@ PY
 else
   echo "-- нет $SPLIT: онлайн-модель пропущена" >&2
 fi
-for dir in "$ROOT"/results/separate/*/; do  # все прогоны отдельного модуля (SB-0.5B, SB-3B, ...)
+for dir in "$ROOT"/results/separate/*/; do  # все оценённые прогоны отдельного модуля (SB-0.5B, SB-3B, ...)
   name="$(basename "$dir")"
   if [[ -f "$dir/predictions_validation.json" && -f "$dir/predictions_test_${ADAPTER}.json" ]]; then
     systems+=(--system "SB: $name (отвечает M_off)" "$dir/predictions_validation.json" "$dir/predictions_test_${ADAPTER}.json")
   fi
 done
-python "$ROOT/scripts/test_report.py" --output "$ROOT/results/separate/test_report.json" "${systems[@]}"
+python "$ROOT/scripts/test_report.py" --criterion "$CRITERION" --output "$ROOT/results/separate/test_report.json" \
+  "${systems[@]}"

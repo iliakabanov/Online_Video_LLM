@@ -26,7 +26,11 @@ pair or only the last (--frames-per-pair); the projector runs in the forward pas
 (--train-projector).
 
 python scripts/train_separate.py --model-config configs/model/llava_ov_0.5b_separate.yaml --output outputs/separate/sb05b
+python scripts/train_separate.py --model-config configs/model/llava_ov_0.5b_separate.yaml \
+    --output outputs/separate/sb05b_proj --train-projector
 python scripts/train_separate.py --output outputs/separate/sb3b --gradient-checkpointing
+python scripts/train_separate.py --output outputs/separate/sb05b --resume        # continue an interrupted run
+Then the threshold on validation and the test: bash experiment_launcher/separate/run.sh outputs/separate/sb05b
 """
 import argparse
 from dataclasses import asdict, replace
@@ -114,8 +118,9 @@ def main() -> None:
                         help="Qwen: as M_off")
     parser.add_argument("--frames-per-pair", type=int, choices=(1, 2), default=2,
                         help="LLaVA-OV: both frames of a pair, or only its last")
-    parser.add_argument("--tokens-side", type=int,
-                        help="LLaVA-OV: tokens per frame = side^2 (default: its own 2 x 2 pooling, 14 -> 196)")
+    parser.add_argument("--tokens-side", type=int, default=7,
+                        help="LLaVA-OV: tokens per frame = side^2 (default 7: 49 per frame, 98 per pair, near SB-3B's "
+                             "54; 14 = its own 2 x 2 pooling, 196 per frame)")
     parser.add_argument("--train-projector", action=argparse.BooleanOptionalAction, default=False,
                         help="LLaVA-OV: train its whole projector too (at --lr, with the LoRA); default frozen")
     parser.add_argument("--encoder-frames", type=int, default=32,
