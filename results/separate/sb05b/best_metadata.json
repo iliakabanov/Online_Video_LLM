@@ -1,0 +1,9 @@
+{
+  "epoch": 10,
+  "format": "online_video_llm_separate_v1",
+  "score": 0.8168019091050134,
+  "selection": "auroc_pm2",
+  "validation_auroc_pm2": 0.8168019091050134,
+  "validation_bce_pm2": 1.0164010474311103,
+  "validation_loss": 0.2648337483406067
+}

@@ -1,0 +1,26 @@
+backbone:
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: 66285546d2b821cf421d4f5eb2576359d3770cd3
+  dtype: bfloat16
+  quantization: null
+lora:
+  enabled: true
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  component: language_model
+  modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  layers: null
+head:
+  classes:
+  - silent
+  - prepare
+  - speak
+  hidden_dims:
+  - 512
+  activation: gelu
+  dropout: 0.1

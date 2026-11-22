@@ -1,0 +1,26 @@
+backbone:
+  model_id: llava-hf/llava-onevision-qwen2-0.5b-ov-hf
+  revision: 74dd0bf867a4cda7950c17663794267c60cf4b40
+  dtype: bfloat16
+  quantization: null
+lora:
+  enabled: true
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  component: language_model
+  modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  layers: null
+head:
+  classes:
+  - silent
+  - prepare
+  - speak
+  hidden_dims:
+  - 512
+  activation: gelu
+  dropout: 0.1

@@ -1,0 +1,56 @@
+{
+  "model_config": "configs/model/llava_ov_0.5b_separate.yaml",
+  "head_config": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/configs/uhead/default.yaml",
+  "validation_from": "/home/jovyan/shares/SR004.nfs2/kabanov/Online_Video_LLM/results/lora/mlp/last_hidden_mlp_off10/predictions_validation.json",
+  "taus": [
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9
+  ],
+  "eval_batch_size": 4,
+  "save_every_epoch": true,
+  "family": "llava_onevision",
+  "train_projector": false,
+  "act": 151648,
+  "token": "<act>",
+  "init_word": "ready",
+  "objective": {
+    "tags": "hard",
+    "step_window": 5,
+    "sigmoid_slope": 0.65
+  },
+  "head": {
+    "groups": [
+      "last_hidden"
+    ],
+    "projection_dims": {
+      "lm": 256,
+      "attention": 256,
+      "entropy": 64,
+      "vision": 128,
+      "confidence": 32,
+      "listen_token_logit": 16,
+      "last_hidden": 256
+    },
+    "projection_hidden_dims": {},
+    "input_dims": {
+      "last_hidden": 896
+    },
+    "model_dim": 512,
+    "nhead": 8,
+    "num_layers": 2,
+    "dropout": 0.2,
+    "normalization_eps": 1e-06,
+    "temporal_detector": "mlp",
+    "compact_model_dim": 128,
+    "compact_nhead": 8,
+    "compact_num_layers": 1,
+    "compact_ffn_dim": 508
+  },
+  "head_lr": 0.0005,
+  "head_weight_decay": 0.0,
+  "selection": "auroc_pm2",
+  "trainable_parameters": 5314177
+}
