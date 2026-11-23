@@ -73,6 +73,7 @@ from uhead.config import UHeadConfig  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_TAUS = [0.5, 0.6, 0.7, 0.8, 0.9]
+FULL_LR = 1.0e-5  # full fine-tuning: LLaVA-OV's own fine-tuning rate for the language model
 
 
 def main() -> None:
@@ -104,8 +105,10 @@ def main() -> None:
     parser.add_argument("--taus", type=float, nargs="+", default=DEFAULT_TAUS)
     parser.add_argument("--epochs", type=int,
                         help="epochs in all (default 10; with --resume: those of the run, more to extend it)")
-    parser.add_argument("--lr", type=float, default=defaults.learning_rate, help="LoRA and <act> (constant)")
-    parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay, help="LoRA and <act>")
+    parser.add_argument("--lr", type=float, help=f"LoRA, <act> and a trained projector, or with --full the whole "
+                                                 f"language model and projector (constant; default "
+                                                 f"{defaults.learning_rate}, with --full {FULL_LR})")
+    parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay, help="the backbone's trained weights")
     parser.add_argument("--head-lr", type=float, default=5.0e-4, help="the head (constant)")
     parser.add_argument("--head-weight-decay", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size, help="sequences per forward pass")
@@ -123,6 +126,11 @@ def main() -> None:
                              "54; 14 = its own 2 x 2 pooling, 196 per frame)")
     parser.add_argument("--train-projector", action=argparse.BooleanOptionalAction, default=False,
                         help="LLaVA-OV: train its whole projector too (at --lr, with the LoRA); default frozen")
+    parser.add_argument("--full", action="store_true",
+                        help="LLaVA-OV: full fine-tuning instead of LoRA — the whole language model (its embedding with "
+                             "<act> too) and the projector, float32 weights in bfloat16 autocast; the vision encoder "
+                             "stays frozen (its cache is the same). Checkpoints are the trained weights, ~2 GB each: "
+                             "consider --no-save-every-epoch")
     parser.add_argument("--encoder-frames", type=int, default=32,
                         help="LLaVA-OV: frames per pass of the vision encoder when filling the cache (less: less memory)")
     parser.add_argument("--num-workers", type=int, default=2)
@@ -142,7 +150,6 @@ def main() -> None:
     args = parser.parse_args()
     if args.resume and args.overwrite:
         parser.error("--resume continues a run, --overwrite deletes it: one of them")
-
     root, run = Path(args.data_root), Path(args.output)
     resuming = args.resume and all((run / name).exists() for name in (RUN_FILE, "split.json", "sft_config.json",
                                                                       "model.yaml"))
@@ -155,6 +162,7 @@ def main() -> None:
         objective = DecisionObjective(**info["objective"])
         config, head_config = ModelConfig.load(run / "model.yaml"), UHeadConfig.from_dict(info["head"])
         train_projector, selection, taus = info.get("train_projector", False), info["selection"], info["taus"]
+        full = info.get("full", False)
         head_lr, head_weight_decay = info["head_lr"], info["head_weight_decay"]
         save_every_epoch = info.get("save_every_epoch", True)
         eval_batch_size = args.eval_batch_size or info["eval_batch_size"]
@@ -163,13 +171,15 @@ def main() -> None:
     else:
         if args.resume:
             print(f"{run}: no run to resume, a new one starts")
-        sft = LoRASFTConfig(learning_rate=args.lr, weight_decay=args.weight_decay, batch_size=args.batch_size,
+        full = args.full
+        lr = args.lr if args.lr is not None else (FULL_LR if full else defaults.learning_rate)
+        sft = LoRASFTConfig(learning_rate=lr, weight_decay=args.weight_decay, batch_size=args.batch_size,
                             gradient_accumulation=args.gradient_accumulation, epochs=args.epochs or 10,
                             gradient_checkpointing=args.gradient_checkpointing, seed=args.seed,
                             overwrite=args.overwrite)
         objective = DecisionObjective(args.tags, args.step_window, args.sigmoid_slope)
         config, head_config = ModelConfig.load(args.model_config), UHeadConfig.load(args.head_config)
-        train_projector, selection, taus = args.train_projector, args.selection, args.taus
+        train_projector, selection, taus = args.train_projector or args.full, args.selection, args.taus
         head_lr, head_weight_decay, save_every_epoch = args.head_lr, args.head_weight_decay, args.save_every_epoch
         eval_batch_size = args.eval_batch_size or 4
         validation_from, validation_questions = args.validation_from, args.validation_questions
@@ -180,9 +190,9 @@ def main() -> None:
     seed_everything(sft.seed)  # the fresh LoRA's A and the head draw from it (a resumed run then loads last/)
     processor = load_processor(config, local_files_only=args.local_files_only)
     model = build_separate_model(config, tokenizer_of(processor), head_config, local_files_only=args.local_files_only,
-                                 device=args.device, train_projector=train_projector)
+                                 device=args.device, train_projector=train_projector, full=full)
     family = make_family(model, processor)
-    assert_separate_isolation(model, expected_targets=expected_lora_targets(model))
+    assert_separate_isolation(model, expected_targets=None if full else expected_lora_targets(model))
     if resuming:
         data = dict(split_info["data"])
         data.update(train_frame_size=tuple(data["train_frame_size"]), num_workers=args.num_workers)
@@ -204,7 +214,8 @@ def main() -> None:
                                        num_workers=args.num_workers, vision_cache=cache_dir)
     split.validate()
     print(f"Decision module: {config.backbone.model_id} ({model.family}), <act> = {model.act}, "
-          f"projector {'trained' if model.train_projector else 'frozen'}, "
+          f"{'full fine-tuning (language model + projector)' if model.full else 'LoRA'}, "
+          f"projector {'trained' if model.train_projector else 'frozen'}, lr {sft.learning_rate:g}, "
           f"{trainable_parameters(model):,} trainable parameters")
 
     train = decision_records(root / split.train, split.train_videos, family=family, split=split)

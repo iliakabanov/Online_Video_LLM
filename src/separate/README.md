@@ -55,6 +55,19 @@
 Пулинг 7×7 сильнее родного для LLaVA-OV (14×14), сдвиг признаков учит LoRA. Абляции: только последний кадр
 (`--frames-per-pair 1`), родные 196 токенов на кадр (`--tokens-side 14`).
 
+### Полное дообучение (`--full`)
+
+Вместо LoRA обучаются вся языковая модель (Qwen2-0.5B, ~494 млн параметров, с эмбеддингом и строкой `<act>`) и
+проектор; энкодер заморожен, кэш тот же. Веса языковой модели и проектора — в float32 (мастер-копия: в bfloat16
+малые обновления при lr ~1e-5 теряются на округлении), прямой проход — в bfloat16 autocast, энкодер — в bfloat16.
+lr по умолчанию 1e-5 (у LoRA 1e-4), остальное как у LoRA-прогонов; `--resume` и `run.sh` работают так же.
+
+- Чекпоинт — все обучаемые тензоры (`trained.safetensors`, ~2 ГБ) и голова; `last/` ещё ~4 ГБ состояния AdamW. С
+  `epoch_<n>/` на каждую эпоху это ~25 ГБ на прогон, поэтому `--no-save-every-epoch` (останутся `best/` и `last/`).
+- Память при обучении — оценка: веса, градиенты и AdamW ~9 ГБ плюс активации, как у LoRA-прогона (~24 ГБ); на
+  A100 80 ГБ помещается, при нехватке — `--gradient-checkpointing`. Эпоха дольше LoRA-прогона (обратный проход по всем
+  весам).
+
 ## SB-3B: Qwen2.5-VL-3B
 
 `configs/model/qwen_3b_lora_sft.yaml` без адаптера M_off. Раскладка онлайн-модели (`lora/online.py`) с `<listen>`,
@@ -87,6 +100,9 @@ python scripts/train_separate.py --model-config $LLAVA --output outputs/separate
 CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/sb05b
 CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/sb05b_proj \
     --train-projector
+# SB-0.5B, полное дообучение языковой модели и проектора
+CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --model-config $LLAVA --output outputs/separate/sb05b_full \
+    --full --no-save-every-epoch
 # SB-3B
 CUDA_VISIBLE_DEVICES=0 python scripts/train_separate.py --output outputs/separate/sb3b --gradient-checkpointing
 ```

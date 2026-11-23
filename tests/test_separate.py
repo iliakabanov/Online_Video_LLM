@@ -50,8 +50,8 @@ def _sharpen(model):
     """Sharper attention, so that a wrong mask or position would show."""
     with torch.no_grad():
         for layer in model.qwen.model.language_model.layers:
-            layer.self_attn.q_proj.base_layer.weight.mul_(6)
-            layer.self_attn.k_proj.base_layer.weight.mul_(6)
+            for projection in (layer.self_attn.q_proj, layer.self_attn.k_proj):
+                getattr(projection, "base_layer", projection).weight.mul_(6)  # LoRA wraps it; full tuning does not
 
 
 def _perturb(model, scale=0.1):
@@ -63,10 +63,21 @@ def _perturb(model, scale=0.1):
     _sharpen(model)
 
 
-def _build(path, tokenizer, train_projector=False):
+def _build(path, tokenizer, train_projector=False, full=False):
     torch.manual_seed(0)
     return build_separate_model(_config(path), tokenizer, UHeadConfig(dropout=0.0), local_files_only=True,
-                                train_projector=train_projector)
+                                train_projector=train_projector, full=full)
+
+
+def _rebuild(model, builder, tiny_base, tiny_llava):
+    """A fresh module of the same kind as ``model`` (the base attention sharpened as _perturb did)."""
+    if model.family == QWEN:
+        fresh = _build(tiny_base, _RemapBuilder(builder.processor).processor.tokenizer)
+    else:
+        fresh = _build(tiny_llava, builder.processor.tokenizer, train_projector=model.train_projector,
+                       full=model.full)
+    _sharpen(fresh)
+    return fresh
 
 
 @pytest.fixture(scope="session")
@@ -91,10 +102,10 @@ def _video_processor():
     return LlavaOnevisionVideoProcessor(size={"height": 56, "width": 56})
 
 
-@pytest.fixture(params=[QWEN, LLAVA, "llava_projector"])
+@pytest.fixture(params=[QWEN, LLAVA, "llava_projector", "llava_full"])
 def separate(request, builder, tiny_base, tiny_llava, tmp_path):
-    """Decision module of either family, LLaVA-OV also with its projector trained (LoRA and <act> perturbed), its
-    family, toy data with a vision cache, the split settings."""
+    """Decision module of either family, LLaVA-OV also with its projector trained and fully fine-tuned (LoRA and <act>
+    perturbed), its family, toy data with a vision cache, the split settings."""
     data, records = _toy_videos(tmp_path)
     if request.param == QWEN:
         tiny = _RemapBuilder(builder.processor)
@@ -102,7 +113,8 @@ def separate(request, builder, tiny_base, tiny_llava, tmp_path):
         family = QwenFamily(model, tiny)
         cache = _toy_cache(model, tiny, data, records, tmp_path)
     else:
-        model = _build(tiny_llava, builder.processor.tokenizer, train_projector=request.param != LLAVA)
+        model = _build(tiny_llava, builder.processor.tokenizer, train_projector=request.param != LLAVA,
+                       full=request.param == "llava_full")
         family = LlavaFamily(model, builder.processor.tokenizer)
         cache = VisionCache(tmp_path / "llava_cache", llava_cache_settings(model, frames_per_pair=2, tokens_side=None))
         assert build_llava_vision_cache(model, _video_processor(), records, cache, data_root=data, num_workers=0) == 2
@@ -134,6 +146,16 @@ def test_act_is_one_token_and_only_lora_the_act_row_and_the_head_train(separate)
     tokenizer = family.builder.processor.tokenizer if isinstance(family, QwenFamily) else family.tokenizer
     assert tokenizer.convert_tokens_to_ids(ACT) == model.act
     assert tokenizer(f"question {ACT}", add_special_tokens=False).input_ids[-1] == model.act
+    assert model.head_config.groups == ["last_hidden"] and model.head_config.temporal_detector == "mlp"
+    assert model.head_config.input_dims == {"last_hidden": model.qwen.config.text_config.hidden_size}
+    if model.full:  # the whole language model (embedding with <act>), the projector and the head; not the encoder
+        assert_separate_isolation(model)
+        trained = {name for name, p in model.named_parameters() if p.requires_grad}
+        assert trained == {name for name, _ in model.named_parameters()
+                           if name.startswith(("backbone.model.language_model.", "backbone.model.multi_modal_projector.",
+                                               "head."))}
+        assert not any("vision_tower" in name for name in trained) and model.train_projector
+        return
     assert_separate_isolation(model, expected_targets=expected_lora_targets(model))
     assert expected_lora_targets(model) == 2 * 4  # the tiny language models: 2 layers x q, k, v, o
     lora = [name for name, p in model.named_parameters() if p.requires_grad and ".lora_" in name]
@@ -144,8 +166,6 @@ def test_act_is_one_token_and_only_lora_the_act_row_and_the_head_train(separate)
     projector = [name for name, p in model.named_parameters() if p.requires_grad and "multi_modal_projector" in name]
     assert bool(projector) == model.train_projector
     assert all(".modules_to_save." in name for name in projector)  # a trainable copy; the original stays frozen
-    assert model.head_config.groups == ["last_hidden"] and model.head_config.temporal_detector == "mlp"
-    assert model.head_config.input_dims == {"last_hidden": model.qwen.config.text_config.hidden_size}
 
 
 def test_targets():
@@ -269,14 +289,23 @@ def test_gradients_reach_only_lora_the_act_row_and_the_head(separate):
     decision_loss(model, collate_decision([_dataset(model, family, records, split)[0]], pad_id=1), family).backward()
     grads = {name: p.grad for name, p in model.named_parameters() if p.requires_grad}
     assert all(g is not None for g in grads.values())
-    parts = ["trainable_tokens_delta", ".lora_A", "head."] + (["multi_modal_projector"] if model.train_projector else [])
+    if model.full:
+        parts = ["language_model.layers", "multi_modal_projector", "head."]
+    else:
+        parts = ["trainable_tokens_delta", ".lora_A", "head."] + (["multi_modal_projector"] if model.train_projector
+                                                                   else [])
     for part in parts:
         assert any(g.abs().sum() > 0 for name, g in grads.items() if part in name), part
     assert model.train_projector == any("multi_modal_projector" in name for name in grads)
+    vision = {name: p.detach().clone() for name, p in model.named_parameters() if "vision_tower" in name}
     optimizer.step()
     after = embed(rows).detach()
-    torch.testing.assert_close(after[:model.act], before[:model.act])  # every other row stays
+    if not model.full:  # full tuning trains every row the sequence uses; LoRA only the <act> row
+        torch.testing.assert_close(after[:model.act], before[:model.act])
     assert not torch.allclose(after[model.act], before[model.act])
+    for name, p in model.named_parameters():
+        if name in vision:
+            assert torch.equal(p, vision[name]), name  # the encoder stays frozen
 
 
 def test_streaming_session_equals_one_pass(separate):
@@ -365,8 +394,9 @@ def test_training_run_writes_adapters_metrics_and_predictions_and_reloads(separa
                           family=family, output_dir=out, device="cpu", objective=objective, evaluate=evaluate,
                           run_info={"note": "test"}, head_lr=1e-3)
     assert best == out / "best"
+    weights = "trained.safetensors" if model.full else "adapter_model.safetensors"
     for name in ("best", "last", "epoch_1", "epoch_2"):
-        assert (out / name / "adapter_model.safetensors").exists() and (out / name / "head.safetensors").exists()
+        assert (out / name / weights).exists() and (out / name / "head.safetensors").exists()
     assert (out / "last" / "optimizer.pt").exists() and not (out / "epoch_1" / "optimizer.pt").exists()
     lines = [json.loads(line) for line in (out / "validation_metrics.jsonl").read_text().splitlines()]
     assert [line["epoch"] for line in lines] == [0, 1, 2]
@@ -382,13 +412,9 @@ def test_training_run_writes_adapters_metrics_and_predictions_and_reloads(separa
     model.eval()
     example = _dataset(model, family, records[:1], split)[0]
     trained = _logits(model, family, [example])
-    if model.family == QWEN:
-        fresh = _build(tiny_base, _RemapBuilder(builder.processor).processor.tokenizer)
-    else:
-        fresh = _build(tiny_llava, builder.processor.tokenizer, train_projector=model.train_projector)
+    fresh = _rebuild(model, builder, tiny_base, tiny_llava)
     assert fresh.act == model.act and fresh.family == model.family
-    assert info["train_projector"] == model.train_projector
-    _sharpen(fresh)  # the base attention that _perturb sharpened in the fixture
+    assert info["train_projector"] == model.train_projector and info["full"] == model.full
     load_separate_adapter(fresh, out / "last")
     torch.testing.assert_close(_logits(fresh.eval(), family, [example]), trained, rtol=1e-4, atol=1e-5)
 
@@ -437,11 +463,7 @@ def test_an_interrupted_run_resumes_as_one_run(separate, builder, tiny_base, tin
     with (out / "train_steps.jsonl").open("a") as file:
         file.write(json.dumps({"global_step": 99, "epoch": 2}) + "\n")
 
-    if model.family == QWEN:
-        fresh = _build(tiny_base, _RemapBuilder(builder.processor).processor.tokenizer)
-    else:
-        fresh = _build(tiny_llava, builder.processor.tokenizer, train_projector=model.train_projector)
-    _sharpen(fresh)  # the base attention that _perturb sharpened in the fixture; the rest comes from last/
+    fresh = _rebuild(model, builder, tiny_base, tiny_llava)  # the rest comes from last/
     run(fresh, out, 3, resume=True)
     resumed = trainable(fresh)
     assert resumed.keys() == whole.keys()

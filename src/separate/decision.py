@@ -178,23 +178,31 @@ def head_config_for(base: UHeadConfig, hidden_size: int) -> UHeadConfig:
 
 
 class SeparateModel(nn.Module):
-    """A VLM with a LoRA, the trainable <act> row and, for LLaVA-OV with ``train_projector``, a trainable copy of its
-    whole projector (``backbone``, PEFT) and the decision head (float32)."""
+    """A VLM and the decision head (float32). ``backbone``: with a LoRA, the trainable <act> row and, for LLaVA-OV with
+    ``train_projector``, a trainable copy of its whole projector (PEFT); or, with ``full`` (LLaVA-OV only), the plain
+    Hugging Face model whose whole language model and projector train, kept in float32 and run in bfloat16 autocast."""
 
     def __init__(self, backbone, config: ModelConfig, head_config: UHeadConfig, act: int, family: str = QWEN,
-                 train_projector: bool = False):
+                 train_projector: bool = False, full: bool = False):
         super().__init__()
         if family not in FAMILIES:
             raise ValueError(f"family must be one of {FAMILIES}")
         self.backbone, self.config, self.head_config, self.act, self.family = backbone, config, head_config, act, family
-        self.train_projector = train_projector
+        self.train_projector, self.full = train_projector or full, full
         self.head = StateHead(head_config)
         self.head.to(device=self.qwen.get_input_embeddings().weight.device, dtype=torch.float32)
 
     @property
     def qwen(self):
         """The Hugging Face model (Qwen2.5-VL or LLaVA-OV; the name is that of the shared LoRA code), adapters in it."""
-        return self.backbone.get_base_model()
+        return self.backbone if self.full else self.backbone.get_base_model()
+
+    def autocast(self):
+        """bfloat16 autocast on CUDA for the float32 weights of full fine-tuning; nothing otherwise."""
+        from contextlib import nullcontext
+        if self.full and self.qwen.get_input_embeddings().weight.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return nullcontext()
 
     def decision_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         """Logits [N] of the hidden states [N, D] at <act> positions."""
@@ -210,16 +218,21 @@ def model_family(config: ModelConfig, *, local_files_only: bool = False) -> str:
     return kind
 
 
-def _load_llava(config: ModelConfig, *, local_files_only: bool, device: str | None):
+def _load_llava(config: ModelConfig, *, local_files_only: bool, device: str | None, full: bool = False):
     """LLaVA-OneVision (frozen) on ``device``; the resolved Hub commit goes into ``config``. Loaded into CPU memory and
     then moved: loading straight onto the GPU crashed in transformers' weight loader on Windows (a 0.5B model costs
-    ~2 GB of RAM this way)."""
+    ~2 GB of RAM this way). ``full``: the language model and projector in float32 (the master weights of full
+    fine-tuning: small updates of bfloat16 weights round away), the vision encoder in config's dtype, so that its
+    cache is the same as for the LoRA runs."""
     from transformers import LlavaOnevisionForConditionalGeneration
     if config.backbone.quantization is not None:
         raise ValueError("Quantization is not supported for LLaVA-OneVision here")
+    dtype = getattr(torch, config.backbone.dtype)
     base = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        config.backbone.model_id, revision=config.backbone.revision, dtype=getattr(torch, config.backbone.dtype),
+        config.backbone.model_id, revision=config.backbone.revision, dtype=torch.float32 if full else dtype,
         local_files_only=local_files_only, attn_implementation="sdpa")
+    if full:
+        base.model.vision_tower.to(dtype)
     if device is not None:
         base.to(device)
     revision = getattr(base.config, "_commit_hash", None)
@@ -232,11 +245,14 @@ PROJECTOR = "multi_modal_projector"  # LLaVA-OV's projector (vision features -> 
 
 
 def build_separate_model(config: ModelConfig, tokenizer, head_config: UHeadConfig, *, local_files_only: bool = False,
-                         device: str | None = None, train_projector: bool = False) -> SeparateModel:
+                         device: str | None = None, train_projector: bool = False,
+                         full: bool = False) -> SeparateModel:
     """The backbone of config.backbone (Qwen2.5-VL without any adapter of M_off, or LLaVA-OneVision) with <act>, a
     fresh LoRA (config.lora, B = 0) and a fresh head (draws from the global torch seed). The token is added to
     ``tokenizer``. ``train_projector`` (LLaVA-OV only): its whole projector trains too, as a PEFT modules_to_save copy
-    that starts from the pretrained one and is saved with the adapter."""
+    that starts from the pretrained one and is saved with the adapter. ``full`` (LLaVA-OV only): no LoRA; the whole
+    language model (with the <act> row of its embedding) and the projector train, in float32; the vision encoder
+    stays frozen."""
     from peft import LoraConfig, TaskType, get_peft_model
     from online_vllm.models import build_model
     from online_vllm.models.builder import resolve_targets
@@ -244,8 +260,9 @@ def build_separate_model(config: ModelConfig, tokenizer, head_config: UHeadConfi
     if not config.lora.enabled or config.lora.component != "language_model":
         raise ValueError("The decision module needs a language_model LoRA config")
     family = model_family(config, local_files_only=local_files_only)
-    if train_projector and family != LLAVA:
-        raise ValueError("train_projector is for LLaVA-OneVision: Qwen's merger is part of its cached encoder output")
+    if (train_projector or full) and family != LLAVA:
+        raise ValueError("train_projector and full are for LLaVA-OneVision (Qwen's merger is part of its cached "
+                         "encoder output; full fine-tuning of the 3B is not set up)")
     config = deepcopy(config)
     if family == QWEN:
         plain = deepcopy(config)
@@ -255,9 +272,14 @@ def build_separate_model(config: ModelConfig, tokenizer, head_config: UHeadConfi
         config.lora.enabled = True
         base = built.backbone
     else:
-        base = _load_llava(config, local_files_only=local_files_only, device=device)
+        base = _load_llava(config, local_files_only=local_files_only, device=device, full=full)
     act = add_act_token(tokenizer)
     init_act_row(base, tokenizer, act)
+    if full:
+        base.model.language_model.requires_grad_(True)
+        getattr(base.model, PROJECTOR).requires_grad_(True)
+        return SeparateModel(base, config, head_config_for(head_config, base.config.text_config.hidden_size), act,
+                             family, True, full=True)
     backbone = get_peft_model(base, LoraConfig(
         task_type=TaskType.CAUSAL_LM, r=config.lora.r, lora_alpha=config.lora.alpha,
         lora_dropout=config.lora.dropout, bias="none", target_modules=resolve_targets(base, config.lora),
@@ -273,9 +295,33 @@ def expected_lora_targets(model: SeparateModel) -> int:
     return layers * len(lora.modules)
 
 
+FULL_PARTS = ("backbone.model.language_model.", f"backbone.model.{PROJECTOR}.", "head.")
+
+
+def _assert_full_isolation(model: nn.Module) -> None:
+    """Full fine-tuning: the whole language model, the projector and the head train; nothing else (the vision encoder
+    stays frozen, its outputs are cached)."""
+    trained = {part: 0 for part in FULL_PARTS}
+    frozen = 0
+    for name, parameter in model.named_parameters():
+        part = next((part for part in FULL_PARTS if name.startswith(part)), None)
+        if parameter.requires_grad:
+            if part is None:
+                raise ValueError(f"Trainable parameter outside the language model, the projector and the head: {name}")
+            trained[part] += 1
+        elif part is not None:
+            frozen += 1
+    if not all(trained.values()) or frozen:
+        raise ValueError(f"Full fine-tuning needs every language-model, projector and head tensor trainable: "
+                         f"{trained}, {frozen} of them frozen")
+
+
 def assert_separate_isolation(model: nn.Module, *, expected_targets: int | None = None) -> None:
     """Only the language-model attention LoRA, the <act> row, the head and, with model.train_projector, the projector
-    copy may train."""
+    copy may train (with model.full: _assert_full_isolation)."""
+    if getattr(model, "full", False):
+        _assert_full_isolation(model)
+        return
     targets, token_rows, head, projector = set(), 0, 0, 0
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
@@ -307,25 +353,48 @@ def trainable_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+FULL_FILE = "trained.safetensors"  # full fine-tuning: every trained backbone tensor (float32), by its name
+
+
+def _trained_backbone(model: SeparateModel) -> dict[str, torch.Tensor]:
+    return {name: parameter for name, parameter in model.backbone.named_parameters() if parameter.requires_grad}
+
+
 def save_separate_adapter(model: SeparateModel, path: str | Path, *,
                           metadata: Mapping[str, Any] | None = None) -> Path:
-    """The LoRA and the <act> row (PEFT, adapter_model.safetensors) and the head (head.safetensors)."""
+    """The LoRA and the <act> row (PEFT, adapter_model.safetensors), or with full fine-tuning every trained backbone
+    tensor (trained.safetensors: the language model, its embedding with <act>, the projector), and the head
+    (head.safetensors)."""
     from safetensors.torch import save_file
     assert_separate_isolation(model)
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    model.backbone.save_pretrained(path, safe_serialization=True)
+    if model.full:
+        save_file({name: value.detach().contiguous().cpu() for name, value in _trained_backbone(model).items()},
+                  str(path / FULL_FILE))
+    else:
+        model.backbone.save_pretrained(path, safe_serialization=True)
     save_file({key: value.detach().contiguous().cpu() for key, value in model.head.state_dict().items()},
               str(path / HEAD_FILE))
-    payload = {"format": SEPARATE_FORMAT, **(dict(metadata) if metadata else {})}
+    payload = {"format": SEPARATE_FORMAT, "full": model.full, **(dict(metadata) if metadata else {})}
     (path / "sft_metadata.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
+@torch.no_grad()
 def load_separate_adapter(model: SeparateModel, path: str | Path) -> SeparateModel:
     from safetensors.torch import load_file
-    load_lora_adapter(model, path)
-    model.head.load_state_dict(load_file(str(Path(path) / HEAD_FILE)))
+    path = Path(path)
+    if model.full:
+        weights, own = load_file(str(path / FULL_FILE)), _trained_backbone(model)
+        if weights.keys() != own.keys():
+            raise ValueError(f"{path} does not hold the trained tensors of this model: unexpected "
+                             f"{sorted(weights.keys() - own.keys())[:3]}, missing {sorted(own.keys() - weights.keys())[:3]}")
+        for name, parameter in own.items():
+            parameter.copy_(weights[name])
+    else:
+        load_lora_adapter(model, path)
+    model.head.load_state_dict(load_file(str(path / HEAD_FILE)))
     return model
 
 
@@ -351,7 +420,7 @@ def load_separate_run(run_dir: str | Path, adapter: str = "best", *, local_files
     processor = load_processor(config, local_files_only=local_files_only)
     model = build_separate_model(config, tokenizer_of(processor), UHeadConfig.from_dict(info["head"]),
                                  local_files_only=local_files_only, device=device,
-                                 train_projector=info.get("train_projector", False))
+                                 train_projector=info.get("train_projector", False), full=info.get("full", False))
     if model.act != info["act"]:
         raise ValueError(f"Token id {model.act} differs from that of the run {info['act']}")
     load_separate_adapter(model, run_dir / adapter)
@@ -566,8 +635,10 @@ def collate_decision(examples: Sequence[Mapping[str, Any]], pad_id: int) -> dict
 
 
 def batch_logits(model: SeparateModel, batch: Mapping[str, torch.Tensor], family) -> torch.Tensor:
-    """Decision logits [N] at every <act> of a collated batch, in batch then position order."""
-    hidden = family.hidden(model, batch)
+    """Decision logits [N] at every <act> of a collated batch, in batch then position order (the head in float32,
+    outside full fine-tuning's autocast)."""
+    with model.autocast():
+        hidden = family.hidden(model, batch)
     return model.decision_logits(hidden[batch["act_row"], batch["act_index"]])
 
 
@@ -971,7 +1042,8 @@ def train_separate(model: SeparateModel, train_loader: DataLoader, config: LoRAS
         (output_dir / "sft_config.json").write_text(json.dumps(asdict(config), indent=2) + "\n", encoding="utf-8")
         model.config.save(output_dir / "model.yaml")
         (output_dir / RUN_FILE).write_text(json.dumps(
-            {**run_info, "family": model.family, "train_projector": model.train_projector, "act": model.act,
+            {**run_info, "family": model.family, "train_projector": model.train_projector, "full": model.full,
+             "act": model.act,
              "token": ACT, "init_word": INIT_WORD, "objective": asdict(objective), "head": asdict(model.head_config),
              "head_lr": head_lr, "head_weight_decay": head_weight_decay, "selection": selection,
              "trainable_parameters": trainable_parameters(model)}, indent=2) + "\n", encoding="utf-8")
@@ -1085,7 +1157,7 @@ class DecisionSession:
         # the flash / memory-efficient kernels fit; bfloat16 p_k differ from the one-pass kernels by ~1e-2.
         from torch.nn.attention import SDPBackend, sdpa_kernel
         with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH],
-                         set_priority=True):
+                         set_priority=True), self.model.autocast():
             out = self.family.forward_cached(self.model, embeds.to(self.device), positions.to(self.device), self.cache)
         self.cache = out.past_key_values
         return out.last_hidden_state[0, -1]
@@ -1097,7 +1169,8 @@ class DecisionSession:
             raise ValueError(f"A pair has {self.state['per']} visual tokens, got {pair_embeds.shape[0]}")
         positions = self.family.advance(self.state, self.pair)
         act = self.model.qwen.get_input_embeddings()(torch.tensor([[self.model.act]], device=self.device))
-        pair = self.family.project(self.model, pair_embeds.to(self.device))
+        with self.model.autocast():
+            pair = self.family.project(self.model, pair_embeds.to(self.device))
         last = self._forward(torch.cat([pair[None].to(act.dtype), act], 1), positions)
         self.pair += 1
         return float(self.model.decision_logits(last[None]).sigmoid()[0])
