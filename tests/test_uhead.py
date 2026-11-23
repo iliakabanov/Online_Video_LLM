@@ -1,3 +1,4 @@
+import pytest
 import torch
 import numpy as np
 
@@ -261,6 +262,70 @@ def test_feature_rows_does_not_read_unselected_groups():
     assert list(rows) == ["confidence"]
     assert rows["confidence"].shape == (3, FEATURE_DIMS["confidence"])
     assert fs.calls == ["probe_logprob"]
+
+
+class _LayeredFeatures:
+    """Toy features of a 4-layer language model, 2 heads; hidden states extracted after layers 2 and 4."""
+    LAYERS, HEADS, HIDDEN = 4, 2, 5
+
+    def __init__(self):
+        rows = self.LAYERS * self.HEADS
+        self.meta = {"layers": self.LAYERS, "heads": self.HEADS, "lm_layers": [2, 4], "max_choices": 4,
+                     "shapes": {"lm_last": [2, self.HIDDEN], "lm_mean": [2, self.HIDDEN],
+                                "probe_hidden": [2, self.HIDDEN], "att_last": [rows, 3], "att_mean": [rows, 3],
+                                "att_probe": [rows, 4], "att_entropy": [3, rows], "probe_logprob": [15],
+                                "vis_mean": [2, 6]}}
+        rng = np.random.default_rng(0)
+        self.arrays = {name: rng.standard_normal((7, *shape)).astype(np.float32)
+                       for name, shape in self.meta["shapes"].items()}
+
+    def question(self, name, index):
+        return self.arrays[name]
+
+    def video(self, index):
+        return self.arrays["vis_mean"]
+
+
+def test_feature_rows_keep_only_the_first_layers():
+    """max_layer = k: lm — extracted layers <= k, attention and entropy — the heads of layers 1..k (columns are
+    layer-major), no groups from the model's output unless k is the last layer; vision does not depend on k."""
+    from uhead.data import feature_dims
+    fs, n = _LayeredFeatures(), 3
+    a, heads = fs.arrays, fs.HEADS
+    full = feature_dims(fs.meta)
+    assert feature_dims(fs.meta, 4) == full and {"confidence", "last_hidden", "lm"} <= set(full)
+    groups = ["lm", "attention", "entropy", "vision"]
+    for name, value in feature_rows(fs, 0, n, groups + ["confidence", "last_hidden"], max_layer=4).items():
+        np.testing.assert_array_equal(value, feature_rows(fs, 0, n, [name])[name])
+
+    dims = feature_dims(fs.meta, 3)
+    assert dims == {"lm": 3 * fs.HIDDEN, "attention": 3 * heads * (3 + 3 + 4), "entropy": 3 * 3 * heads,
+                    "vision": full["vision"]}
+    rows = feature_rows(fs, 0, n, groups, max_layer=3)
+    np.testing.assert_array_equal(rows["lm"], np.concatenate(
+        [a[name][:n, 0] for name in ("lm_last", "lm_mean", "probe_hidden")], 1))
+    np.testing.assert_array_equal(rows["attention"], np.concatenate(
+        [a[name][:n, :3 * heads].reshape(n, -1) for name in ("att_last", "att_mean", "att_probe")], 1))
+    np.testing.assert_array_equal(rows["entropy"], a["att_entropy"][:n, :, :3 * heads].reshape(n, -1))
+    np.testing.assert_array_equal(rows["vision"], a["vis_mean"][:n].reshape(n, -1))
+
+    assert "lm" not in feature_dims(fs.meta, 1) and feature_dims(fs.meta, 1)["attention"] == heads * 10
+    for groups, layer in ((["lm"], 1), (["confidence"], 3), (["last_hidden"], 3)):
+        with pytest.raises(ValueError, match="при слоях 1"):
+            feature_rows(fs, 0, n, groups, max_layer=layer)
+    for layer in (0, 5):
+        with pytest.raises(ValueError, match="max_layer"):
+            feature_dims(fs.meta, layer)
+
+
+def test_max_layer_is_saved_with_the_head(tmp_path):
+    with pytest.raises(ValueError, match="max_layer"):
+        UHeadConfig(max_layer=0).validate()
+    config = UHeadConfig(groups=["attention"], input_dims={"attention": 20}, max_layer=12,
+                         temporal_detector="mlp")
+    config.save(tmp_path / "uhead.yaml")
+    assert UHeadConfig.load(tmp_path / "uhead.yaml").max_layer == 12
+    assert UHeadConfig.from_dict({"groups": ["lm"]}).max_layer is None  # configs written before max_layer
 
 
 def test_confidence_representation_keeps_choice_availability_and_is_finite():

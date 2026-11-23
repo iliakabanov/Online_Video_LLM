@@ -21,6 +21,7 @@ MODE="${MODE:-}"
 UHEAD_CONFIG_PATH="${UHEAD_CONFIG_PATH:-$ROOT/configs/uhead/default.yaml}"
 EPOCHS="${EPOCHS:-}"            # пусто — optim.epochs из configs/train/group1.yaml
 SELECTION="${SELECTION:-loss}"  # best.pt: loss (наименьший validation loss) или auroc_pm2 (наибольший AUROC в окне ±2)
+MAX_LAYER="${MAX_LAYER:-}"      # пусто — все слои; k — признаки только слоёв языковой модели 1..k (uhead max_layer)
 
 run_experiment() {
   local experiment_id="$1" architecture="$2"; shift 2
@@ -62,7 +63,7 @@ PY
   trap 'rm -f "$train_config" "$uhead_config"' RETURN
   ROOT="$ROOT" TRAIN_FEATURES="$TRAIN_FEATURES" VAL_FEATURES="$VAL_FEATURES" EPOCHS="$EPOCHS" \
     FEATURE_GROUPS="${groups[*]}" DETECTOR="$detector" TRAIN_CONFIG="$train_config" UHEAD_CONFIG="$uhead_config" \
-    UHEAD_CONFIG_PATH="$UHEAD_CONFIG_PATH" python - <<'PY'
+    UHEAD_CONFIG_PATH="$UHEAD_CONFIG_PATH" MAX_LAYER="$MAX_LAYER" python - <<'PY'
 import os
 from pathlib import Path
 import yaml
@@ -77,6 +78,8 @@ if os.environ["EPOCHS"]:
 uhead = yaml.safe_load(Path(os.environ["UHEAD_CONFIG_PATH"]).read_text(encoding="utf-8"))
 uhead["groups"] = os.environ["FEATURE_GROUPS"].split()
 uhead["temporal_detector"] = os.environ["DETECTOR"]
+if os.environ["MAX_LAYER"]:
+    uhead["max_layer"] = int(os.environ["MAX_LAYER"])
 Path(os.environ["TRAIN_CONFIG"]).write_text(yaml.safe_dump(train, sort_keys=False), encoding="utf-8")
 Path(os.environ["UHEAD_CONFIG"]).write_text(yaml.safe_dump(uhead, sort_keys=False), encoding="utf-8")
 PY
@@ -95,6 +98,7 @@ config.update({
     "mode": os.environ["MODE"], "architecture": os.environ["ARCHITECTURE"], "experiment_id": os.environ["EXPERIMENT_ID"],
     "feature_groups": os.environ["FEATURE_GROUPS"].split(), "training_gt": os.environ["TAG_MODE"], "seed": 0,
     "checkpoint_path": str(checkpoint / "best.pt"), "best_epoch": results["best_epoch"],
+    "max_layer": config.get("uhead_config", {}).get("max_layer"),
 })
 Path(os.environ["RESULT"]).joinpath("run_config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY

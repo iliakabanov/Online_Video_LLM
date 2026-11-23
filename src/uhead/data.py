@@ -72,33 +72,79 @@ def confidence_features(raw: np.ndarray, max_choices: int) -> np.ndarray:
 GROUP_ARRAYS = {"lm": ("lm_last", "lm_mean", "probe_hidden"), "attention": ("att_last", "att_mean", "att_probe"),
                 "entropy": ("att_entropy",), "vision": ("vis_mean",), "confidence": ("probe_logprob",),
                 "listen_token_logit": ("listen_token_logit",)}
+# Группы с выхода языковой модели (после её последнего слоя): при max_layer меньше числа слоёв их нет.
+OUTPUT_GROUPS = ("confidence", "listen_token_logit", "last_hidden")
 
 
-def feature_dims(meta: dict) -> dict[str, int]:
+def _depth(meta: dict, max_layer: int | None) -> int:
+    """Число первых слоёв языковой модели, признаки которых видит голова (max_layer; None — все)."""
+    layers = int(meta["layers"])
+    if max_layer is None:
+        return layers
+    if not 1 <= max_layer <= layers:
+        raise ValueError(f"max_layer должен лежать в 1..{layers}, получено {max_layer}")
+    return int(max_layer)
+
+
+def lm_layer_indices(meta: dict, max_layer: int | None = None) -> list[int]:
+    """Индексы извлечённых слоёв (meta lm_layers, нумерация с 1) не глубже max_layer — оси слоя массивов группы lm."""
+    depth = _depth(meta, max_layer)
+    return [i for i, layer in enumerate(meta["lm_layers"]) if layer <= depth]
+
+
+def _limit(name: str, array: np.ndarray, meta: dict, max_layer: int | None) -> np.ndarray:
+    """Массив name [пары, ...] только со слоями 1..max_layer: у lm — ось извлечённых слоёв, у внимания и энтропии —
+    столбцы голов, которые идут по слоям подряд (столбец = (слой − 1) · heads + голова)."""
+    if max_layer is None:
+        return array
+    if name in GROUP_ARRAYS["lm"]:
+        return array[:, lm_layer_indices(meta, max_layer)]
+    columns = _depth(meta, max_layer) * int(meta["heads"])
+    if name in GROUP_ARRAYS["attention"]:
+        return array[:, :columns]
+    if name == "att_entropy":
+        return array[:, :, :columns]
+    return array
+
+
+def feature_dims(meta: dict, max_layer: int | None = None) -> dict[str, int]:
     """Размеры групп в этих признаках (meta.json): у признаков онлайн-модели attention шире (группа <listen>) и есть
-    listen_token_logit; группы, массивов которых нет, не входят."""
-    shapes = meta["shapes"]
+    listen_token_logit; группы, массивов которых нет, не входят. max_layer — только слои языковой модели 1..max_layer:
+    lm — извлечённые слои не глубже него (нет таких — группы нет), attention и entropy — головы этих слоёв, группы с
+    выхода модели (OUTPUT_GROUPS) — только при всех слоях; vision от слоёв языковой модели не зависит."""
+    shapes = {name: tuple(_limit(name, np.empty((1, *shape), dtype=np.uint8), meta, max_layer).shape[1:])
+              for name, shape in meta["shapes"].items()}
     dims = {name: sum(int(np.prod(shapes[a])) for a in arrays) for name, arrays in GROUP_ARRAYS.items()
             if all(a in shapes for a in arrays)}
+    dims = {name: size for name, size in dims.items() if size > 0}
     if "confidence" in dims:  # буквы дополнены до CONFIDENCE_SLOTS и индикатор доступности каждой (confidence_features)
         dims["confidence"] += 2 * CONFIDENCE_SLOTS - meta["max_choices"]
     if "lm_last" in shapes and meta.get("layers") in meta.get("lm_layers", []):
-        dims["last_hidden"] = int(shapes["lm_last"][1])  # последний слой в позиции решения
+        dims["last_hidden"] = int(meta["shapes"]["lm_last"][1])  # последний слой в позиции решения
+    if max_layer is not None and _depth(meta, max_layer) < int(meta["layers"]):
+        for name in OUTPUT_GROUPS:
+            dims.pop(name, None)
     return dims
 
 
-def feature_rows(fs: FeatureSet, index: int, n: int, groups: list[str]) -> dict[str, np.ndarray]:
-    """Возвращает исходные признаки первых n пар без изменения порядка координат."""
+def feature_rows(fs: FeatureSet, index: int, n: int, groups: list[str],
+                 max_layer: int | None = None) -> dict[str, np.ndarray]:
+    """Возвращает исходные признаки первых n пар без изменения порядка координат (max_layer — feature_dims)."""
     if not groups or len(groups) != len(set(groups)) or set(groups) - set(FEATURE_DIMS):
         raise ValueError("groups должны быть непустым списком уникальных известных групп")
-    dims = feature_dims(fs.meta)
+    dims = feature_dims(fs.meta, max_layer)
     missing = set(groups) - set(dims)
     if missing:
-        raise ValueError(f"В этих признаках нет групп {sorted(missing)} (есть {sorted(dims)})")
+        depth = "" if max_layer is None else f" при слоях 1..{max_layer}"
+        raise ValueError(f"В этих признаках{depth} нет групп {sorted(missing)} (есть {sorted(dims)})")
+
+    def question(name):
+        return _limit(name, fs.question(name, index)[:n], fs.meta, max_layer)
+
     loaders = {
-        "lm": lambda: [fs.question(name, index)[:n] for name in ("lm_last", "lm_mean", "probe_hidden")],
-        "attention": lambda: [fs.question(name, index)[:n] for name in ("att_last", "att_mean", "att_probe")],
-        "entropy": lambda: [fs.question("att_entropy", index)[:n]],
+        "lm": lambda: [question(name) for name in ("lm_last", "lm_mean", "probe_hidden")],
+        "attention": lambda: [question(name) for name in ("att_last", "att_mean", "att_probe")],
+        "entropy": lambda: [question("att_entropy")],
         "vision": lambda: [fs.video(index)[:n]],
         "confidence": lambda: [confidence_features(fs.question("probe_logprob", index)[:n], fs.meta["max_choices"])],
         "listen_token_logit": lambda: [fs.question("listen_token_logit", index)[:n]],
@@ -115,9 +161,10 @@ def feature_rows(fs: FeatureSet, index: int, n: int, groups: list[str]) -> dict[
 
 
 class ReadinessDataset(Dataset):
-    """Одна запись датасета — одна отдельная видеопоследовательность, не объединённая с другими."""
-    def __init__(self, fs: FeatureSet, items: list[LabelledItem], groups: list[str]):
-        self.fs, self.items, self.groups = fs, items, groups
+    """Одна запись датасета — одна отдельная видеопоследовательность, не объединённая с другими. max_layer — признаки
+    только слоёв языковой модели 1..max_layer (feature_dims)."""
+    def __init__(self, fs: FeatureSet, items: list[LabelledItem], groups: list[str], max_layer: int | None = None):
+        self.fs, self.items, self.groups, self.max_layer = fs, items, groups, max_layer
 
     def __len__(self):
         return len(self.items)
@@ -125,7 +172,7 @@ class ReadinessDataset(Dataset):
     def __getitem__(self, position):
         item = self.items[position]
         n = len(item.target)
-        return feature_rows(self.fs, item.index, n, self.groups), item.target, item
+        return feature_rows(self.fs, item.index, n, self.groups, self.max_layer), item.target, item
 
 
 def collate(batch):
@@ -147,12 +194,12 @@ def collate(batch):
 
 def fit_normalization(dataset: ReadinessDataset) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
     """Потоковые train-only mean/std в float32 без материализации всего набора в памяти."""
-    dims = feature_dims(dataset.fs.meta)
+    dims = feature_dims(dataset.fs.meta, dataset.max_layer)
     count = {name: 0 for name in dataset.groups}
     total = {name: np.zeros(dims[name], dtype=np.float64) for name in dataset.groups}
     square = {name: np.zeros(dims[name], dtype=np.float64) for name in dataset.groups}
     for item in dataset.items:
-        values = feature_rows(dataset.fs, item.index, len(item.target), dataset.groups)
+        values = feature_rows(dataset.fs, item.index, len(item.target), dataset.groups, dataset.max_layer)
         for name, x in values.items():
             x = x.astype(np.float64, copy=False)
             count[name] += len(x)

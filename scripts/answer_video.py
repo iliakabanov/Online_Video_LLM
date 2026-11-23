@@ -116,7 +116,8 @@ def main():
     tags = head.tag_settings
     items, _ = labelled(fs, train_config, tags["tags"], tags["step_window"], tags["sigmoid_slope"],
                         tags.get("gaussian_sigma", 2.0))
-    _, rows = predict(head, ReadinessDataset(fs, items, head_config(head).groups), train_config, args.device)
+    _, rows = predict(head, ReadinessDataset(fs, items, head_config(head).groups, head_config(head).max_layer),
+                      train_config, args.device)
 
     patch, stride = fs.meta["temporal_patch"], fs.meta["frame_stride"]
     last_frame = lambda pair: (pair * patch + patch - 1) * stride  # noqa: E731 — решение принимается после пары

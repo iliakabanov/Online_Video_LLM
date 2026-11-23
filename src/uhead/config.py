@@ -15,6 +15,9 @@ class UHeadConfig:
     # Размеры входов групп в признаках, на которых учится голова (uhead.data.feature_dims из meta.json); пусто —
     # FEATURE_DIMS, признаки офлайн-модели. Сохраняются с конфигом: голова читает ровно те признаки, на которых училась.
     input_dims: dict[str, int] = field(default_factory=dict)
+    # Голова видит признаки только слоёв языковой модели 1..max_layer (uhead.data.feature_dims): решение требует
+    # прохода лишь этих слоёв. None — все слои.
+    max_layer: int | None = None
     model_dim: int = 512
     nhead: int = 8
     num_layers: int = 2
@@ -37,6 +40,9 @@ class UHeadConfig:
             raise ValueError("projection_dims must name every known feature group")
         if set(self.input_dims) - set(FEATURE_DIMS) or any(v <= 0 for v in self.input_dims.values()):
             raise ValueError("input_dims must map known feature groups to positive sizes")
+        if self.max_layer is not None and (isinstance(self.max_layer, bool) or not isinstance(self.max_layer, int)
+                                           or self.max_layer < 1):
+            raise ValueError("max_layer must be a positive integer or None")
         if set(self.projection_hidden_dims) - set(FEATURE_DIMS):
             raise ValueError("projection_hidden_dims contains an unknown feature group")
         if any(v <= 0 for v in self.projection_dims.values()) or any(v <= 0 for v in self.projection_hidden_dims.values()):

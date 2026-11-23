@@ -69,7 +69,7 @@ def export_predictions(model_name: str, checkpoint: str | Path, features: str | 
     metadata["feature_groups"] = list(head_config.groups)
     rows = []
     for index, target, visible in items:
-        values = feature_rows(fs, index, fs.patches[index], head_config.groups)
+        values = feature_rows(fs, index, fs.patches[index], head_config.groups, head_config.max_layer)
         features_tensor = {name: torch.from_numpy(value)[None].to(device) for name, value in values.items()}
         probability = uhead_probabilities(model(features_tensor).cpu())[0]
         record = fs.records[index]

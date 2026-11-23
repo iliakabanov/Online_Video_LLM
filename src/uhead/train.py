@@ -256,13 +256,14 @@ def train(uhead_config, train_config, data_root: Path, output_dir: Path, device,
                 len(validation_items), len(split["validation_videos"]), len(test_items), len(split["test_videos"]))
     # Размеры входов — из самих признаков (у онлайн-модели attention шире, есть listen_token_logit); сохраняются в
     # конфиге головы, так что load_checkpoint строит её под те же признаки.
-    dims = feature_dims(train_fs.meta)
+    dims = feature_dims(train_fs.meta, uhead_config.max_layer)
     missing = set(uhead_config.groups) - set(dims)
     if missing:
-        raise ValueError(f"В признаках {train_config.features.train} нет групп {sorted(missing)}")
+        depth = "" if uhead_config.max_layer is None else f" (слои 1..{uhead_config.max_layer})"
+        raise ValueError(f"В признаках {train_config.features.train}{depth} нет групп {sorted(missing)}")
     uhead_config.input_dims = {g: dims[g] for g in uhead_config.groups}
-    train_data = ReadinessDataset(train_fs, train_items, uhead_config.groups)
-    validation_data = ReadinessDataset(eval_fs, validation_items, uhead_config.groups)
+    train_data = ReadinessDataset(train_fs, train_items, uhead_config.groups, uhead_config.max_layer)
+    validation_data = ReadinessDataset(eval_fs, validation_items, uhead_config.groups, uhead_config.max_layer)
     model = (StateHead(uhead_config) if uhead_config.temporal_detector == "mlp" else UHead(uhead_config)).to(device)
     model.tag_settings = tag_settings
     model.set_normalization(fit_normalization(train_data))

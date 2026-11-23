@@ -237,7 +237,7 @@ def analyze(checkpoint: Path, features: Path, output: Path, max_videos: int, see
         questions = []
         for row in rows:  # deliberately independent inference per question
             index, record, target_pair = row["index"], row["record"], row["target_pair"]
-            values = feature_rows(fs, index, fs.patches[index], cfg.groups)
+            values = feature_rows(fs, index, fs.patches[index], cfg.groups, cfg.max_layer)
             inputs = {name: torch.from_numpy(value)[None].to(device) for name, value in values.items()}
             probabilities = uhead_probabilities(model(inputs))[0]
             questions.append(question_statistics(record, target_pair, probabilities))

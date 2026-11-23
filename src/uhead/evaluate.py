@@ -44,7 +44,7 @@ def evaluate_test(run_dir: str | Path, threshold: float, data_root: str | Path, 
     if len(items) != split["test_questions"]:
         raise ValueError(f"В test {len(items)} вопросов, а split.json ожидает {split['test_questions']}: "
                          "признаки eval или разметка не совпадают с обучением")
-    dataset = ReadinessDataset(fs, items, head_config(model).groups)
+    dataset = ReadinessDataset(fs, items, head_config(model).groups, head_config(model).max_layer)
     loss, rows = predict(model, dataset, config, device, config.optim.batch_size)
     result = _readiness(rows, [threshold], fs.meta, threshold, model_name, tag_settings["tags"])
     summary = {"model": model_name, "feature_groups": head_config(model).groups, **tag_settings,
