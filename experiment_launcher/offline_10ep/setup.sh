@@ -11,7 +11,7 @@ export DATA_ROOT="${DATA_ROOT:-$ROOT/data}"
 ADAPTER_RUN="${ADAPTER_RUN:-offline_10ep}"
 export TRAIN_FEATURES="${TRAIN_FEATURES:-$DATA_ROOT/features/group1_half_s1_252x168/train_${ADAPTER_RUN}_best_videos1000}"
 export VAL_FEATURES="${VAL_FEATURES:-$DATA_ROOT/features/group1_half_s1_252x168/val_${ADAPTER_RUN}_best_videos1000}"
-export MODE=lora TAG_MODE=hard EPOCHS="${EPOCHS:-10}" SELECTION="${SELECTION:-auroc_pm2}"
+export MODE=lora TAG_MODE="${TAG_MODE:-hard}" EPOCHS="${EPOCHS:-10}" SELECTION="${SELECTION:-auroc_pm2}"
 # Суффикс id запусков: results/lora/<arch>/<группа>_<arch>_<SUFFIX>, не пересекается с прежними головами.
 SUFFIX="${SUFFIX:-off10}"
 GROUPS_TO_RUN=(lm attention entropy vision confidence)

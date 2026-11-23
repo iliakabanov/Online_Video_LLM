@@ -290,6 +290,30 @@ def test_choice_probabilities_and_answer_curves():
     assert result["curve"][0]["p_correct"] == pytest.approx(.75)
 
 
+def test_threshold_curves_agree_with_operating_point():
+    """scripts/threshold_curves.py: accuracy, premature share and delay at every τ are those of operating_point."""
+    import sys
+    from pathlib import Path
+    from online_vllm.eval.metrics import operating_point
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from threshold_curves import curves
+    rng = np.random.default_rng(0)
+    rows = [{"probabilities": rng.random(n).tolist(), "target_pair": int(rng.integers(n)),
+             "answer_correct": rng.random(n).round().astype(bool).tolist()} for n in rng.integers(3, 12, 40)]
+    from online_vllm.eval.thresholds import payload_arrays
+    arrays = payload_arrays({"predictions": rows})
+    taus = np.array([0.05, 0.3, 0.5, 0.8, 0.97])
+    result = curves(arrays, taus)
+    for i, tau in enumerate(taus):
+        point = operating_point(arrays["probabilities"], arrays["target_pairs"], arrays["valid_mask"],
+                                arrays["correct"], tau)
+        assert result["premature_rate"][i] == pytest.approx(point["premature_rate"])
+        assert result["accuracy_timely"][i] == pytest.approx(point["accuracy"])
+        assert result["forced_rate"][i] == pytest.approx(point["forced_rate"])
+        assert result["latency_mean"][i] == pytest.approx(point["latency_mean"])
+        assert result["latency_median"][i] == pytest.approx(point["latency_median"])
+
+
 def test_readiness_curves_agree_with_online_metrics():
     from online_vllm.eval.readiness_plot import load_traces, readiness_curves
     probabilities = [[.1, .1, .9, .9, .9], [.9, .1, .1, .1, .1], [.1, .1, .1, .1, .9], [.1] * 5]
