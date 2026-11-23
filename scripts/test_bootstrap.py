@@ -21,7 +21,7 @@ import numpy as np
 
 import _paths  # noqa: F401  (src/ on the path)
 from online_vllm.eval.metrics import constraint_key
-from online_vllm.eval.report import questions, test_report
+from online_vllm.eval.report import _aligned, combined, questions, test_report, two_detector_report
 
 LATENCY_KEYS = {"latency_R5_A90": constraint_key(0.05, 0.90), "latency_R10_A90": constraint_key(0.10, 0.90)}
 VIDEO = re.compile(r"^([a-z]+_\d+)_")
@@ -61,12 +61,20 @@ def first_fire(probabilities, n: int, tau: float) -> tuple[int, bool]:
     return (int(hits[0]), True) if len(hits) else (n - 1, False)
 
 
+def _rows(payload: dict, order: list[str]) -> list[dict]:
+    rows = {row["record_id"]: row for row in payload["predictions"]}
+    return [rows[record_id] for record_id in order]
+
+
 class System:
-    def __init__(self, name: str, validation: dict, test: dict, order: list[str]):
-        self.name = name
-        self.report = test_report(validation, test, "on_time_0_4")
-        rows = {row["record_id"]: row for row in test["predictions"]}
-        rows = [rows[record_id] for record_id in order]
+    """report — test_report или two_detector_report; test — предсказания test, по которым считаются AUROC и on_time
+    (для пары — оценки s_k правила при τ1 критерия); latency_tests — то же для каждой задержки (для пары — при τ1,
+    выбранном для её ограничений), по умолчанию test."""
+
+    def __init__(self, name: str, report: dict, test: dict, order: list[str], latency_tests: dict | None = None):
+        self.name, self.report = name, report
+        latency_tests = latency_tests or {}
+        rows = _rows(test, order)
         scores, labels, question, offsets = [], [], [], []
         for q, row in enumerate(rows):
             p = np.asarray(row["probabilities"], dtype=float)
@@ -94,7 +102,8 @@ class System:
                 self.latency[name] = None
                 continue
             timely, delay = np.zeros(len(rows)), np.zeros(len(rows))
-            for q, row in enumerate(rows):
+            key_rows = _rows(latency_tests[name], order) if name in latency_tests else rows
+            for q, row in enumerate(key_rows):
                 k, _ = first_fire(row["probabilities"], len(row["probabilities"]), chosen["tau"])
                 timely[q] = k >= row["target_pair"]
                 delay[q] = max(k - row["target_pair"], 0)
@@ -125,22 +134,44 @@ class System:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--system", nargs=3, action="append", required=True, metavar=("NAME", "VALIDATION", "TEST"))
+    parser.add_argument("--system", nargs=3, action="append", default=[], metavar=("NAME", "VALIDATION", "TEST"))
+    parser.add_argument("--pair", nargs=6, action="append", default=[],
+                        metavar=("NAME", "MODE", "VAL_P", "TEST_P", "VAL_Q", "TEST_Q"),
+                        help="два детектора одной модели (как в scripts/test_report.py): and | or, пара порогов "
+                             "с validation (online_vllm/eval/report.py two_detector_report)")
     parser.add_argument("--resamples", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", help="JSON с точечными значениями и интервалами")
     args = parser.parse_args()
 
+    if not args.system and not args.pair:
+        parser.error("нужен хотя бы один --system или --pair")
     systems, reference, order = [], None, None
-    for name, validation, test in args.system:
-        test_payload = _load(test)
+
+    def check(name, test_payload):
+        nonlocal reference, order
         current = questions(test_payload)
         if reference is None:
-            reference, order = current, [row["record_id"] for row in test_payload["predictions"]]
-        elif current != reference:
-            raise SystemExit(f"Test «{name}» — другие вопросы или целевые пары, чем у «{args.system[0][0]}»")
-        systems.append(System(name, _load(validation), test_payload, order))
+            reference, order = (name, current), [row["record_id"] for row in test_payload["predictions"]]
+        elif current != reference[1]:
+            raise SystemExit(f"Test «{name}» — другие вопросы или целевые пары, чем у «{reference[0]}»")
+
+    for name, validation, test in args.system:
+        test_payload = _load(test)
+        check(name, test_payload)
+        systems.append(System(name, test_report(_load(validation), test_payload, "on_time_0_4"), test_payload, order))
         print(f"загружено: {name}")
+    for name, mode, val_p, test_p, val_q, test_q in args.pair:
+        test_first, test_second = _load(test_p), _load(test_q)
+        check(name, test_first)
+        report = two_detector_report(_load(val_p), test_first, _load(val_q), test_second, mode, "on_time_0_4")
+        second_scores = _aligned(test_first, test_second)
+        latency_tests = {key: combined(test_first, second_scores, report["constrained_latency"][constraint]["tau1"],
+                                       mode) for key, constraint in LATENCY_KEYS.items()}
+        systems.append(System(name, report, combined(test_first, second_scores, report["tau1"], mode), order,
+                              latency_tests))
+        print(f"загружено: {name} (τ1 = {report['tau1']:.4g}, τ2 = {report['tau']:.4g})")
+    reference = reference[1]
 
     videos, video_index = np.unique([video_of(record_id) for record_id in order], return_inverse=True)
     rng = np.random.default_rng(args.seed)
