@@ -280,6 +280,12 @@ def test_choice_probabilities_and_answer_curves():
     assert result["levels"]["first_pair"]["accuracy"] == 1.0 and result["levels"]["first_pair"]["count"] == 1
     assert result["levels"]["at_target"] == pytest.approx({"count": 1, "accuracy": 0.0, "p_correct": .25,
                                                            "p_answer": .75, "chance": .5})
+    # t ~ U(t*, T): the mean over pairs t*..T of each question, then over questions.
+    late = AnswerTrace(np.array([[.9, .1], [.2, .8], [.4, .6], [.7, .3]]), correct=1, target_pair=1, visible_pair=1)
+    after = answer_curves([trace, late], offsets=range(0, 1))["levels"]["after_target"]
+    assert after["count"] == 2
+    assert after["accuracy"] == pytest.approx((0.0 + 2 / 3) / 2)
+    assert after["p_correct"] == pytest.approx((.25 + (.8 + .6 + .3) / 3) / 2)
     assert [row["count"] for row in result["curve"]] == [1, 1, 0]
     assert result["curve"][0]["p_correct"] == pytest.approx(.75)
 

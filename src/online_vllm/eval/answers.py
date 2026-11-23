@@ -75,6 +75,17 @@ def _stats(points) -> dict:
             "chance": float(np.mean([1 / t.probabilities.shape[1] for t, _ in points]))}
 
 
+def _after_target(traces) -> dict:
+    """Ответ в случайный момент t ~ U(t*, T): у каждого вопроса — среднее по парам от целевой до последней (точное
+    матожидание по равномерной паре), затем среднее по вопросам; count — число вопросов."""
+    spans = [(t, np.arange(t.target_pair, len(t.probabilities))) for t in traces]
+    return {"count": len(spans),
+            "accuracy": float(np.mean([t.is_correct[s].mean() for t, s in spans])),
+            "p_correct": float(np.mean([t.probabilities[s, t.correct].mean() for t, s in spans])),
+            "p_answer": float(np.mean([t.probabilities[s].max(1).mean() for t, s in spans])),
+            "chance": float(np.mean([1 / t.probabilities.shape[1] for t, _ in spans]))}
+
+
 def answer_curves(traces: list[AnswerTrace], offsets=range(-10, 21)) -> dict:
     """Опорные уровни и кривые по сдвигу пары относительно целевой; у каждого вопроса заданы target и visible."""
     if not traces:
@@ -88,6 +99,7 @@ def answer_curves(traces: list[AnswerTrace], offsets=range(-10, 21)) -> dict:
         "first_pair": _stats([(t, 0) for t in traces if t.visible_pair >= 1]),
         "before_visible": _stats([(t, t.visible_pair - 1) for t in traces if t.visible_pair >= 1]),
         "at_target": _stats([(t, t.target_pair) for t in traces]),
+        "after_target": _after_target(traces),  # t ~ U(t*, T)
         "at_end": _stats([(t, len(t.probabilities) - 1) for t in traces]),
     }
     curve = [{"offset": int(d), **_stats([(t, t.target_pair + d) for t in traces
@@ -189,7 +201,8 @@ def main():
     fmt = lambda level: "—" if level["accuracy"] is None else f"{level['accuracy']:.3f} (n = {level['count']})"
     print(f"{result['questions']} вопросов; угадывание {levels['chance']:.3f}; точность на первой паре "
           f"{fmt(levels['first_pair'])}, перед появлением ответа {fmt(levels['before_visible'])}, "
-          f"на целевой паре {fmt(levels['at_target'])}, в конце видео {fmt(levels['at_end'])}")
+          f"на целевой паре {fmt(levels['at_target'])}, в случайный момент после неё t ~ U(t*, T) "
+          f"{fmt(levels['after_target'])}, в конце видео {fmt(levels['at_end'])}")
     if args.plot:
         plot_curves(result, args.plot, f"{Path(args.features).name}: {result['questions']} вопросов, "
                                        f"speak_delay = {config.labels.speak_delay}")

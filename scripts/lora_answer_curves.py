@@ -162,8 +162,17 @@ def main() -> None:
         results[name] = {**answer_curves(traces, range(start, stop + 1)), "by_pair": pair_curve(traces),
                          "mean_target_pair": sum(t.target_pair for t in traces) / len(traces)}
         levels = results[name]["levels"]
-        print(f"{NAMES[name]}: " + ", ".join(f"{key} {levels[key]['accuracy']:.3f}"
-                                             for key in ("first_pair", "before_visible", "at_target", "at_end")))
+        print(f"{NAMES[name]}: " + ", ".join(f"{key} {levels[key]['accuracy']:.3f}" for key in
+                                             ("first_pair", "before_visible", "at_target", "after_target", "at_end")))
+    # Четыре момента ответа: t = 0 (первая пара), t = t* (целевая пара), t ~ U(t*, T) (среднее по парам от целевой
+    # до последней), t = T (конец видео).
+    print(f"\nТочность, %: {args.part}, {len(provider.records)} вопросов")
+    print(f"{'модель':24s} {'t = 0':>7s} {'t = t*':>7s} {'U(t*,T)':>8s} {'t = T':>7s}")
+    for name, result in results.items():
+        levels = result["levels"]
+        print(f"{NAMES[name]:24s} " + " ".join(f"{100 * levels[key]['accuracy']:{width}.1f}" for key, width in
+                                               (("first_pair", 7), ("at_target", 7), ("after_target", 8),
+                                                ("at_end", 7))))
 
     output = Path(args.output) if args.output else run / f"answer_curves_{args.part}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
