@@ -223,18 +223,21 @@ def _load_llava(config: ModelConfig, *, local_files_only: bool, device: str | No
     then moved: loading straight onto the GPU crashed in transformers' weight loader on Windows (a 0.5B model costs
     ~2 GB of RAM this way). ``full``: the language model and projector in float32 (the master weights of full
     fine-tuning: small updates of bfloat16 weights round away), the vision encoder in config's dtype, so that its
-    cache is the same as for the LoRA runs."""
+    cache is the same as for the LoRA runs. The model is loaded in config's dtype, as for the LoRA runs (the same
+    starting weights), and upcast after the move to ``device``: loading straight in float32 converts every tensor on
+    the CPU in transformers' loader threads, where torch failed with "Failed to initialize cpuinfo!" on the server."""
     from transformers import LlavaOnevisionForConditionalGeneration
     if config.backbone.quantization is not None:
         raise ValueError("Quantization is not supported for LLaVA-OneVision here")
     dtype = getattr(torch, config.backbone.dtype)
     base = LlavaOnevisionForConditionalGeneration.from_pretrained(
-        config.backbone.model_id, revision=config.backbone.revision, dtype=torch.float32 if full else dtype,
+        config.backbone.model_id, revision=config.backbone.revision, dtype=dtype,
         local_files_only=local_files_only, attn_implementation="sdpa")
-    if full:
-        base.model.vision_tower.to(dtype)
     if device is not None:
         base.to(device)
+    if full:
+        base.float()  # on the device, so the conversion does not run on the CPU
+        base.model.vision_tower.to(dtype)  # exact: its weights came in this dtype
     revision = getattr(base.config, "_commit_hash", None)
     if revision:
         config.backbone.revision = revision
