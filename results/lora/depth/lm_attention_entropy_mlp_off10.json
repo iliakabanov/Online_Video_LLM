@@ -1,0 +1,137 @@
+[
+  {
+    "k": 12,
+    "layers_share": 0.3333333333333333,
+    "run": "depth12_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 8,
+    "auroc_pm2": 0.7176405682106572,
+    "on_time_0_4": 0.4110466890448581,
+    "tau": 0.7357624471187592,
+    "latency_mean_R0.05_A0.85": 16.325305073859987
+  },
+  {
+    "k": 15,
+    "layers_share": 0.4166666666666667,
+    "run": "depth15_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 8,
+    "auroc_pm2": 0.7224652644382441,
+    "on_time_0_4": 0.42050656087885263,
+    "tau": 0.6396305561065674,
+    "latency_mean_R0.05_A0.85": 16.355812459858704
+  },
+  {
+    "k": 18,
+    "layers_share": 0.5,
+    "run": "depth18_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 8,
+    "auroc_pm2": 0.7663329366383711,
+    "on_time_0_4": 0.5300579798596277,
+    "tau": 0.7538805305957794,
+    "latency_mean_R0.05_A0.85": 12.523274478330658
+  },
+  {
+    "k": 21,
+    "layers_share": 0.5833333333333334,
+    "run": "depth21_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 8,
+    "auroc_pm2": 0.8026436180697747,
+    "on_time_0_4": 0.6194690265486725,
+    "tau": 0.6770506203174591,
+    "latency_mean_R0.05_A0.85": 9.935131663455364
+  },
+  {
+    "k": 24,
+    "layers_share": 0.6666666666666666,
+    "run": "depth24_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 8,
+    "auroc_pm2": 0.857375878237531,
+    "on_time_0_4": 0.7729630759841318,
+    "tau": 0.9652754366397858,
+    "latency_mean_R0.05_A0.85": 4.092164418754014
+  },
+  {
+    "k": 27,
+    "layers_share": 0.75,
+    "run": "depth27_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 7,
+    "auroc_pm2": 0.8619551192627084,
+    "on_time_0_4": 0.7683857186451022,
+    "tau": 0.9230360090732574,
+    "latency_mean_R0.05_A0.85": 4.094733461785485
+  },
+  {
+    "k": 30,
+    "layers_share": 0.8333333333333334,
+    "run": "depth30_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 10,
+    "auroc_pm2": 0.8624960563240216,
+    "on_time_0_4": 0.7836435764418676,
+    "tau": 0.9896476864814758,
+    "latency_mean_R0.05_A0.85": 4.011881824020552
+  },
+  {
+    "k": 33,
+    "layers_share": 0.9166666666666666,
+    "run": "depth33_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 10,
+    "auroc_pm2": 0.8628505551596701,
+    "on_time_0_4": 0.7854745193774794,
+    "tau": 0.9846935868263245,
+    "latency_mean_R0.05_A0.85": 4.100834938985228
+  },
+  {
+    "k": 36,
+    "layers_share": 1.0,
+    "run": "depth36_lm_attention_entropy_mlp_off10",
+    "groups": [
+      "lm",
+      "attention",
+      "entropy"
+    ],
+    "best_epoch": 9,
+    "auroc_pm2": 0.8580890791754386,
+    "on_time_0_4": 0.7747940189197436,
+    "tau": 0.958265632390976,
+    "latency_mean_R0.05_A0.85": 3.9871547848426463
+  }
+]
