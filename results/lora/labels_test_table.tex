@@ -1,0 +1,29 @@
+\begin{table}[t]
+  \centering
+  \caption{Training label ablation: MLP detector on lm + attention features of $M_{\mathrm{off}}$ (19.86M parameters;
+    test, 3229 questions; thresholds chosen on validation). Hard: $y_k = [k \ge t^*]$; step: additionally $y_k = 0.5$
+    for the 5 pairs before $t^*$; sigmoid: $y_k = \sigma(0.65\,(k - t^*) + \ln 9)$. $\pm$: 95\% CI, video-level
+    bootstrap; latency: mean delay in frames. Bold: the labels used in the rest of the paper.}
+  \label{tab:labels-ablation}
+  \setlength{\tabcolsep}{4pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lccccc}
+    \toprule
+    \multirow{2}{*}{Labels}
+      & \multirow{2}{*}{AUROC $\uparrow$}
+      & \multirow{2}{*}{AUROC$\pm$5 $\uparrow$}
+      & \multirow{2}{*}{On-time, \% $\uparrow$}
+      & \multicolumn{2}{c}{Latency @ $A \ge 90\%$ $\downarrow$} \\
+    \cmidrule(lr){5-6}
+      & & & & $P \le 5\%$ & $P \le 10\%$ \\
+    \midrule[1.2pt]
+    \textbf{Hard}
+      & \textbf{0.994}\ci{0.001} & \textbf{0.939}\ci{0.005} & \textbf{77.8}\ci{1.7} & \textbf{8.07}\ci{0.52} & \textbf{5.42}\ci{0.42} \\
+    Step
+      & 0.993\ci{0.001} & 0.921\ci{0.006} & 78.3\ci{1.7} & 7.83\ci{0.47} & 5.29\ci{0.38} \\
+    Sigmoid
+      & 0.992\ci{0.001} & 0.906\ci{0.007} & 78.2\ci{1.7} & 9.06\ci{0.39} & 5.81\ci{0.37} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}

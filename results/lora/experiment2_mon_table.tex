@@ -1,0 +1,31 @@
+\begin{table}[t]
+  \centering
+  \caption{Native decision vs.\ external readiness detector on $M_{\mathrm{on}}$ (test, 3229 questions; thresholds
+    chosen on validation). $\pm$: 95\% CI, video-level bootstrap; latency: mean delay in frames. AND/OR combine the
+    online model's native detector with the MLP attention head using two thresholds, both chosen on validation.
+    Bold: the best value in each column and all values whose CI overlaps the CI of the best one.}
+  \label{tab:experiment2-mon}
+  \setlength{\tabcolsep}{4pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lccccc}
+    \toprule
+    \multirow{2}{*}{System}
+      & \multirow{2}{*}{AUROC $\uparrow$}
+      & \multirow{2}{*}{AUROC$\pm$5 $\uparrow$}
+      & \multirow{2}{*}{On-time, \% $\uparrow$}
+      & \multicolumn{2}{c}{Latency @ $A \ge 90\%$ $\downarrow$} \\
+    \cmidrule(lr){5-6}
+      & & & & $P \le 5\%$ & $P \le 10\%$ \\
+    \midrule[1.2pt]
+    Native \texttt{<listen>}/\texttt{<speak>} detector
+      & \textbf{0.996}\ci{0.001} & \textbf{0.965}\ci{0.004} & 83.6\ci{1.6} & 5.31\ci{0.50} & 3.68\ci{0.42} \\
+    MLP on attention
+      & \textbf{0.997}\ci{0.001} & \textbf{0.968}\ci{0.003} & \textbf{87.0}\ci{1.4} & \textbf{4.07}\ci{0.31} & \textbf{2.70}\ci{0.27} \\
+    AND(native, MLP on attention)
+      & \textbf{0.995}\ci{0.001} & \textbf{0.965}\ci{0.004} & \textbf{87.1}\ci{1.4} & \textbf{3.98}\ci{0.32} & \textbf{2.72}\ci{0.27} \\
+    OR(native, MLP on attention)
+      & \textbf{0.996}\ci{0.001} & \textbf{0.967}\ci{0.004} & \textbf{87.0}\ci{1.4} & \textbf{3.88}\ci{0.31} & \textbf{2.65}\ci{0.26} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}

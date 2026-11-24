@@ -1,0 +1,19 @@
+\begin{table}[t]
+  \centering
+  \caption{AUROC$\pm$5 of the readiness detector architectures on each feature group of $M_{\mathrm{off}}$ (test, 3229
+    questions). The Compact Transformer has the same number of parameters as the MLP; the Transformer has about
+    6M more. $\pm$: 95\% CI, video-level bootstrap. Bold: within each row, the best value and all values whose CI
+    overlaps the CI of the best one.}
+  \label{tab:architecture-auroc-pm5}
+  \begin{tabular}{lccc}
+    \toprule
+    Features & MLP & Compact Transformer & Transformer \\
+    \midrule[1.2pt]
+    LM         & \textbf{0.936}\ci{0.006} & \textbf{0.938}\ci{0.005} & \textbf{0.934}\ci{0.005} \\
+    Attention  & \textbf{0.939}\ci{0.005} & \textbf{0.936}\ci{0.005} & \textbf{0.938}\ci{0.005} \\
+    Entropy    & \textbf{0.924}\ci{0.006} & \textbf{0.919}\ci{0.006} & \textbf{0.923}\ci{0.006} \\
+    Vision     & 0.645\ci{0.012}          & \textbf{0.688}\ci{0.009} & \textbf{0.693}\ci{0.009} \\
+    Confidence & \textbf{0.763}\ci{0.008} & \textbf{0.773}\ci{0.008} & \textbf{0.770}\ci{0.008} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
