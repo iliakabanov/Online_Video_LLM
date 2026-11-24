@@ -1,4 +1,4 @@
-"""Выбор веса лосса ответа онлайн-SFT (experiment_launcher/answer_weight/train.sh) по validation.
+"""Выбор веса лосса ответа онлайн-SFT (scripts/train_online_sft_weight.py) по validation.
 
 Эпоха каждого прогона — его best/ по bce_pm2 (best_epoch последней строки validation_metrics.jsonl). Вес — по
 наименьшей средней задержке при доле преждевременных <= 5% и точности >= 90% (R0.05_A0.9) у этой эпохи. Для страховки
@@ -6,13 +6,15 @@
 пересчитывается из predictions_validation_epoch_<n>.json без GPU, поэтому работает и для старых прогонов, которые
 логировали только A 0.85 / 0.88.
 
-PYTHONPATH=src python experiment_launcher/answer_weight/choose_weight.py outputs/listen_sft_10ep outputs/listen_sft_10ep_aw0.5 ...
+python scripts/choose_answer_weight.py outputs/listen_sft_10ep outputs/listen_sft_10ep_aw0.5 \\
+    outputs/listen_sft_10ep_aw0.25 outputs/listen_sft_10ep_aw0.1 --output outputs/answer_weight_choice.json
 """
 import argparse
 import json
 import sys
 from pathlib import Path
 
+import _paths  # noqa: F401  (src/ on the path)
 from online_vllm.eval.metrics import constrained_latency
 from online_vllm.eval.thresholds import payload_arrays
 
