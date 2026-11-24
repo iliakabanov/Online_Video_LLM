@@ -49,6 +49,28 @@ VIDEOS=all bash scripts/prepare_clevrer_proactive.sh   # плюс 18,6 ГБ ви
 
 Корень данных — `./data`, его можно перенести переменной `DATA_ROOT`.
 
+## Архив признаков и кэшей
+
+Крупные посчитанные данные вынесены с сервера на Яндекс Диск (rclone, remote `yadisk`). Пути на диске повторяют
+пути в репозитории под `yadisk:Online_Video_LLM/`. Обе копии сверены `rclone check --one-way` (MD5).
+
+| путь | размер | что это |
+|---|---|---|
+| `data/features/group1_half_s1_252x168/{train,val}_offline_10ep_best_videos1000` | ~62 ГБ | признаки M_off (`offline_10ep/best`) для голов |
+| `data/features/group1_half_s1_252x168/{train,val}_listen_sft_10ep_epoch_10_videos1000` | ~65 ГБ | признаки M_on (`listen_sft_10ep/epoch_10`) |
+| `data/cache/separate_vision` | ~28 ГБ | кэш энкодера для отдельного модуля решения (StreamBridge) |
+
+`data/cache/lora_vision` остаётся на сервере: на нём идёт онлайн-SFT.
+
+```bash
+rclone copy yadisk:Online_Video_LLM/<путь> <путь> -P                  # вернуть папку перед переобучением
+rclone copy <путь> yadisk:Online_Video_LLM/<путь> -P --transfers 4    # выгрузить новую; повтор докачивает недостающее
+rclone check <путь> yadisk:Online_Video_LLM/<путь> --one-way           # удалять локально только после «0 differences found»
+```
+
+На сервере rclone не установлен глобально: бинарник и конфиг лежат в `~/shares/SR004.nfs2/kabanov/rclone/`, вызывать
+`.../rclone/rclone --config .../rclone/rclone.conf`.
+
 ## Добавление нового датасета
 
 1. `dataset_builders/<имя>/`: скачивание, построение, экспорт в `data/processed/<имя>/<split>.jsonl` через

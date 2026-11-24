@@ -26,7 +26,8 @@ from lora.lora import LoRASFTConfig
 REPO = Path(__file__).resolve().parents[1]
 
 
-def reference_command(reference: Path, answer_weight: float, output: str, epochs: int | None) -> list[str]:
+def reference_command(reference: Path, answer_weight: float, output: str, epochs: int | None,
+                      save_every_epoch: bool = False, overwrite: bool = False) -> list[str]:
     run = json.loads((reference / "online.json").read_text(encoding="utf-8"))
     sft = json.loads((reference / "sft_config.json").read_text(encoding="utf-8"))
     split = json.loads((reference / "split.json").read_text(encoding="utf-8"))
@@ -54,9 +55,12 @@ def reference_command(reference: Path, answer_weight: float, output: str, epochs
                "--epochs", str(sft["epochs"] if epochs is None else epochs), "--lr", f"{sft['learning_rate']:g}",
                "--batch-size", str(sft["batch_size"]), "--gradient-accumulation", str(sft["gradient_accumulation"]),
                "--gradient-checkpointing" if sft["gradient_checkpointing"] else "--no-gradient-checkpointing",
-               "--seed", str(sft["seed"]), "--output", output]
+               "--seed", str(sft["seed"]), "--output", output,
+               "--save-every-epoch" if save_every_epoch else "--no-save-every-epoch"]
     if online_train.get("videos") is not None:
         command += ["--train-videos", str(online_train["videos"])]
+    if overwrite:
+        command.append("--overwrite")
     return command
 
 
@@ -67,13 +71,18 @@ def main() -> None:
     parser.add_argument("--answer-weight", type=float, required=True)
     parser.add_argument("--output", help="default <reference>_aw<answer_weight>")
     parser.add_argument("--epochs", type=int, help="default: as the reference")
+    parser.add_argument("--save-every-epoch", action=argparse.BooleanOptionalAction, default=False,
+                        help="also keep the adapter of every epoch, epoch_<n>/ (default no: best/ and last/ only; the "
+                             "per-epoch validation predictions that choose_answer_weight.py reads are kept anyway)")
+    parser.add_argument("--overwrite", action="store_true", help="delete a nonempty --output (a failed run) first")
     parser.add_argument("--dry-run", action="store_true", help="print the command of train_online_sft.py and exit")
     args = parser.parse_args()
     if args.answer_weight < 0:
         parser.error("--answer-weight must be >= 0")
 
     output = args.output or f"{args.reference}_aw{args.answer_weight:g}"
-    command = reference_command(args.reference, args.answer_weight, output, args.epochs)
+    command = reference_command(args.reference, args.answer_weight, output, args.epochs,
+                                save_every_epoch=args.save_every_epoch, overwrite=args.overwrite)
     print(shlex.join(command), flush=True)
     if not args.dry_run:
         sys.exit(subprocess.call(command))
