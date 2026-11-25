@@ -82,7 +82,7 @@ def step_features(args, dirs: dict) -> None:
                      "--data-root", args.data_root])
 
 
-def step_head(args, dirs: dict, checkpoint: Path, results: Path) -> None:
+def step_head(args, dirs: dict, checkpoint: Path, results: Path, groups: tuple = ("attention",)) -> None:
     if (checkpoint / "best.pt").exists() and (results / "results.json").exists() and not args.overwrite:
         print(f"\n-- голова уже обучена: {checkpoint} (--overwrite — заново)")
         return
@@ -96,13 +96,13 @@ def step_head(args, dirs: dict, checkpoint: Path, results: Path) -> None:
     checkpoint.mkdir(parents=True, exist_ok=True)
     results.mkdir(parents=True, exist_ok=True)
 
-    # Конфиги как у common.sh run_experiment: group1.yaml с путями этих признаков, uhead default.yaml с группой attention.
+    # Конфиги как у common.sh run_experiment: group1.yaml с путями этих признаков, uhead default.yaml с группами groups.
     train = yaml.safe_load((REPO / "configs/train/group1.yaml").read_text(encoding="utf-8"))
     train["features"]["train"], train["features"]["eval"] = str(dirs["train"]), str(dirs["eval"])
     train["seed"] = 0
     train["optim"]["epochs"] = args.epochs
     uhead = yaml.safe_load((REPO / "configs/uhead/default.yaml").read_text(encoding="utf-8"))
-    uhead["groups"], uhead["temporal_detector"] = ["attention"], "mlp"
+    uhead["groups"], uhead["temporal_detector"] = list(groups), "mlp"
     with tempfile.TemporaryDirectory() as tmp:
         train_config, uhead_config = Path(tmp) / "train.yaml", Path(tmp) / "uhead.yaml"
         train_config.write_text(yaml.safe_dump(train, sort_keys=False), encoding="utf-8")
@@ -115,7 +115,7 @@ def step_head(args, dirs: dict, checkpoint: Path, results: Path) -> None:
     config = json.loads((checkpoint / "experiment.json").read_text(encoding="utf-8"))
     best_epoch = json.loads((results / "results.json").read_text(encoding="utf-8"))["best_epoch"]
     config.update({"mode": "lora", "architecture": "mlp", "experiment_id": checkpoint.name,
-                   "feature_groups": ["attention"], "training_gt": "hard", "seed": 0,
+                   "feature_groups": list(groups), "training_gt": "hard", "seed": 0,
                    "checkpoint_path": str(checkpoint / "best.pt"), "best_epoch": best_epoch,
                    "max_layer": config.get("uhead_config", {}).get("max_layer"),
                    "online_run": str(args.run), "online_adapter": args.adapter})
