@@ -6,7 +6,7 @@ scripts/test_report.py, online_vllm/eval/report.py test_report).
 (validation_12500_clevrer_query_material_0 -> validation_12500). Интервал перцентильный (2.5% и 97.5%), пороги
 фиксированы с validation; выборки видео одни и те же для всех систем (у всех систем test — одни вопросы).
 
-Метрики: AUROC по всем парам и в окне |k - t*| <= 5, доля ответов вовремя (on_time_0_4: 0..4 пары после целевой) при
+Метрики: AUROC по всем парам и в окнах |k - t*| <= 2 и <= 5, доля ответов вовремя (on_time_0_4: 0..4 пары после целевой) при
 τ критерия, средняя задержка непреждевременных ответов (пары после t*) при τ ограничений R ≤ 5% / 10% и A ≥ 90%.
 
 python scripts/test_bootstrap.py --output results/test_bootstrap.json \\
@@ -84,6 +84,8 @@ class System:
         scores, labels = np.concatenate(scores), np.concatenate(labels)
         question, offsets = np.concatenate(question), np.concatenate(offsets)
         self.all_pairs = Pairs(scores, labels, question)
+        near = np.abs(offsets) <= 2
+        self.pm2 = Pairs(scores[near], labels[near], question[near])
         near = np.abs(offsets) <= 5
         self.pm5 = Pairs(scores[near], labels[near], question[near])
 
@@ -110,7 +112,8 @@ class System:
             self.latency[name] = (timely, delay)
 
     def metrics(self, weights: np.ndarray) -> dict:
-        result = {"auroc": self.all_pairs.auroc(weights), "auroc_pm5": self.pm5.auroc(weights),
+        result = {"auroc": self.all_pairs.auroc(weights), "auroc_pm2": self.pm2.auroc(weights),
+                  "auroc_pm5": self.pm5.auroc(weights),
                   "on_time_0_4": float(weights @ self.on_time / weights.sum())}
         for name, value in self.latency.items():
             if value is None:
@@ -124,7 +127,8 @@ class System:
     def reference(self) -> dict:
         """Точечные значения из test_report — для сверки с весами 1."""
         classification, at = self.report["classification"], self.report["at_tau"]
-        result = {"auroc": classification["auroc"], "auroc_pm5": classification["auroc_pm5"],
+        result = {"auroc": classification["auroc"], "auroc_pm2": classification["auroc_pm2"],
+                  "auroc_pm5": classification["auroc_pm5"],
                   "on_time_0_4": at["on_time_0_4"]}
         for name, key in LATENCY_KEYS.items():
             point = self.report["constrained_latency"][key]["test_at_validation_tau"]
@@ -190,7 +194,7 @@ def main() -> None:
                                          "max": max(question_counts)}, "systems": {}}
     print(f"\ntest: {len(videos)} видео, {len(order)} вопросов; {args.resamples} выборок видео с возвращением "
           f"(вопросов в выборке {min(question_counts)}..{max(question_counts)}); 95% перцентильный интервал")
-    keys = ["auroc", "auroc_pm5", "on_time_0_4", *LATENCY_KEYS]
+    keys = ["auroc", "auroc_pm2", "auroc_pm5", "on_time_0_4", *LATENCY_KEYS]
     for system in systems:
         point, check = system.metrics(np.ones(len(order))), system.reference()
         for key in keys:
@@ -215,10 +219,10 @@ def main() -> None:
         return f"{v:.{digits}f} [{lo * scale:.{digits}f}, {hi * scale:.{digits}f}]"
 
     width = max(len(s.name) for s in systems)
-    print(f"{'система':{width}s} | {'AUROC':^21s} | {'AUROC±5':^21s} | {'On-time, %':^18s} | "
+    print(f"{'система':{width}s} | {'AUROC':^21s} | {'AUROC±2':^21s} | {'AUROC±5':^21s} | {'On-time, %':^18s} | "
           f"{'Latency A≥90% P≤5%':^18s} | {'Latency A≥90% P≤10%':^18s}")
     for name, e in output["systems"].items():
-        print(f"{name:{width}s} | {cell(e['auroc'])} | {cell(e['auroc_pm5'])} | "
+        print(f"{name:{width}s} | {cell(e['auroc'])} | {cell(e['auroc_pm2'])} | {cell(e['auroc_pm5'])} | "
               f"{cell(e['on_time_0_4'], 100, 1)} | {cell(e['latency_R5_A90'], 1, 2)} | {cell(e['latency_R10_A90'], 1, 2)}")
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

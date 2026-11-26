@@ -115,7 +115,7 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     draws = rng.integers(0, len(videos), size=(args.resamples, len(videos)))
     weights = np.stack([np.bincount(draw, minlength=len(videos)) for draw in draws]).astype(float)[:, video_index]
-    keys = ["auroc_pm5", "on_time_0_4", *LATENCY_KEYS]
+    keys = ["auroc_pm2", "auroc_pm5", "on_time_0_4", *LATENCY_KEYS]
     output = {"run": str(args.run), "adapter": args.adapter, "suffix": suffix, "videos": int(len(videos)),
               "questions": len(order), "resamples": args.resamples, "seed": args.seed, "systems": {}}
     for system in systems:
@@ -146,10 +146,11 @@ def main() -> None:
     width = max(len(name) for name, _ in rows)
     print(f"\nValidation: {len(videos)} видео, {len(order)} вопросов; 95% интервал по {args.resamples} выборкам видео; "
           f"задержка в кадрах (2 кадра на пару)")
-    print(f"{'детектор':{width}s} | {'AUROC±5':^21s} | {'On-time, %':^18s} | {'Задержка P≤5%':^21s} | "
-          f"{'Задержка P≤10%':^21s}")
+    print(f"{'детектор':{width}s} | {'AUROC±2':^21s} | {'AUROC±5':^21s} | {'On-time, %':^18s} | "
+          f"{'Задержка P≤5%':^21s} | {'Задержка P≤10%':^21s}")
     for name, e in rows:
-        print(f"{name:{width}s} | {cell(e['auroc_pm5'], 1, 3)} | {cell(e['on_time_0_4'], 100, 1)} | "
+        print(f"{name:{width}s} | {cell(e['auroc_pm2'], 1, 3)} | {cell(e['auroc_pm5'], 1, 3)} | "
+              f"{cell(e['on_time_0_4'], 100, 1)} | "
               f"{cell(e['latency_R5_A90'], 2, 2)} | {cell(e['latency_R10_A90'], 2, 2)}")
     path = REPO / "results/lora" / f"validation_sweep_{suffix}.json"
     path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
